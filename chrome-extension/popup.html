@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Casework Capture</title><link rel="stylesheet" href="common.css">
+<style>body { width: 320px; padding: 14px; } .small { font-size: 12px; } #debug { margin-top: 10px; }</style></head>
+<body>
+  <h1>Send case to Casework</h1>
+  <p class="hint">Open a case in Salesforce with its feed showing (e.g. <em>All Updates</em>), then click Capture.</p>
+  <label class="check"><input type="checkbox" id="expand" checked> Expand "show more" posts first</label>
+  <div class="row" style="margin-top:10px">
+    <button class="primary" id="capture">Capture this case</button>
+    <a href="#" id="settings" class="small">Settings</a>
+  </div>
+  <div id="status" class="status"></div>
+  <div class="row small" id="debug"><a href="#" id="debugBtn">Download page structure (no case data) for troubleshooting</a></div>
+  <script src="popup.js"></script>
+</body>
+</html>

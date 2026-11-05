@@ -23,13 +23,18 @@ def create_app(test_config=None):
 
     app.config.setdefault("CASEWORK_USERNAME", os.environ.get("CASEWORK_USERNAME"))
     app.config.setdefault("CASEWORK_PASSWORD", os.environ.get("CASEWORK_PASSWORD"))
+    app.config.setdefault("CASEWORK_API_TOKEN", os.environ.get("CASEWORK_API_TOKEN"))
+    app.config.setdefault("MAX_CONTENT_LENGTH", 20 * 1024 * 1024)
 
     db.init_app(app)
     _install_basic_auth(app)
 
     from . import routes
 
+    from . import imports
+
     app.register_blueprint(routes.bp)
+    app.register_blueprint(imports.bp)
     routes.register_template_helpers(app)
 
     with app.app_context():
@@ -48,8 +53,8 @@ def _install_basic_auth(app):
     @app.before_request
     def _require_login():
         user, pwd = app.config.get("CASEWORK_USERNAME"), app.config.get("CASEWORK_PASSWORD")
-        if not (user and pwd):
-            return None
+        if not (user and pwd) or request.path.startswith("/api/"):
+            return None  # /api/ uses CASEWORK_API_TOKEN instead (see imports.py)
         auth = request.authorization
         if (auth and auth.type == "basic"
                 and hmac.compare_digest((auth.username or "").encode(), user.encode())

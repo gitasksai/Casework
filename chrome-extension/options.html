@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Casework Capture settings</title><link rel="stylesheet" href="common.css">
+<style>body { max-width: 560px; padding: 24px; }</style></head>
+<body>
+  <h1>Casework Capture settings</h1>
+
+  <label for="serverUrl">Casework server address</label>
+  <input type="url" id="serverUrl" placeholder="http://127.0.0.1:5000 or https://casework.mycompany.local:8443">
+  <div class="hint">The address you open Casework at, without anything after the port.</div>
+
+  <label for="apiToken">API token</label>
+  <input type="password" id="apiToken" autocomplete="off">
+  <div class="hint">Must match <code>CASEWORK_API_TOKEN</code> on the server. Leave empty only if the server has no login.</div>
+
+  <label for="userName">Your name as shown in Salesforce</label>
+  <input type="text" id="userName" placeholder="e.g. Sathishkumar Ashok">
+  <div class="hint">Used to tell your messages apart from the customer's. If empty, the Case Owner is used.</div>
+
+  <div class="row" style="margin-top:16px">
+    <button class="primary" id="save">Save</button>
+    <button id="test">Test connection</button>
+  </div>
+  <div id="status" class="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>

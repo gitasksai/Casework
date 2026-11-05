@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Review import{% endblock %}
+
+{% macro direction_badge(it) %}
+  {% if it.direction == 'outbound' %}<span class="badge text-bg-primary">You</span>
+  {% elif it.direction == 'inbound' %}<span class="badge text-bg-success">Customer</span>
+  {% else %}<span class="badge text-bg-secondary">System</span>{% endif %}
+  {% if it.visibility == 'internal' %}<span class="badge text-bg-warning">Internal</span>{% endif %}
+  {% if it.kind == 'email' %}<span class="badge text-bg-light border">Email</span>{% endif %}
+{% endmacro %}
+
+{% macro item_card(it, checked) %}
+  <div class="card mb-2 import-item {% if not checked %}opacity-75{% endif %}">
+    <div class="card-body py-2">
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+        <input class="form-check-input mt-0" type="checkbox" name="include_{{ it.key }}" value="1"
+               id="inc-{{ it.key }}" {% if checked %}checked{% endif %}>
+        <label class="fw-semibold" for="inc-{{ it.key }}">{{ it.author }}</label>
+        {{ direction_badge(it) }}
+        <span class="text-body-secondary small">{{ it.when|dt if it.when else 'time unknown' }}</span>
+        {% if it.reason %}<span class="badge text-bg-light border text-wrap">{{ it.reason }}</span>{% endif %}
+        <select class="form-select form-select-sm ms-auto w-auto" name="cat_{{ it.key }}" aria-label="Import as">
+          {% for c in categories %}
+            <option value="{{ c }}" {% if c == it.category %}selected{% endif %}>{{ ENTRY_TYPES[c].label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% if it.subject %}<div class="small"><strong>Subject:</strong> {{ it.subject }}</div>{% endif %}
+      {% if it.question and it.category in ('scoping', 'initial_response') %}
+        <div class="small mt-1"><strong>Scoping questions:</strong></div>
+        <div class="prewrap small import-text">{{ it.question }}</div>
+        <div class="small mt-1"><strong>Customer answer:</strong></div>
+        <div class="prewrap small import-text">{{ it.response or 'No reply found yet.' }}</div>
+        {% if it.category == 'initial_response' %}
+          <details class="small mt-1"><summary>Full message</summary><div class="prewrap import-text">{{ it.clean }}</div></details>
+        {% endif %}
+      {% else %}
+        <div class="prewrap small import-text">{{ it.clean or '(empty)' }}</div>
+      {% endif %}
+    </div>
+  </div>
+{% endmacro %}
+
+{% block content %}
+{% set included = plan['items']|selectattr('include')|list %}
+{% set already = plan['items']|selectattr('already')|list %}
+{% set ignored = plan['items']|rejectattr('include')|rejectattr('already')|list %}
+
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <h1 class="h4 mb-0">Review import · Case {{ plan.case.case_number or '(no number found)' }}</h1>
+  {% if existing %}
+    <span class="badge text-bg-info">Updating existing case</span>
+  {% else %}
+    <span class="badge text-bg-success">New case</span>
+  {% endif %}
+  {% if payload.url %}<a class="ms-auto small" href="{{ payload.url }}" target="_blank" rel="noopener">Open in Salesforce</a>{% endif %}
+</div>
+
+{% for w in plan.warnings %}<div class="alert alert-warning py-2">{{ w }}</div>{% endfor %}
+{% if not plan['items'] %}
+  <div class="alert alert-warning">No feed items were captured. Make sure the case feed is visible
+    (e.g. the <em>All Updates</em> tab) before capturing.</div>
+{% endif %}
+
+<form method="post">
+  <div class="card mb-4">
+    <div class="card-header fw-semibold">Case details</div>
+    <div class="card-body">
+      <p class="small text-body-secondary mb-2">Ticked fields are written to the case. You can edit the values first.
+        {% if existing %}Fields that already have a value in Casework are unticked by default.{% endif %}</p>
+      <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead><tr><th style="width:2rem"></th><th>Field</th><th>From Salesforce</th>{% if existing %}<th>Currently in Casework</th>{% endif %}</tr></thead>
+        <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><input class="form-check-input" type="checkbox" name="apply_{{ r.name }}" value="1" {% if r.checked %}checked{% endif %} aria-label="Apply {{ r.label }}"></td>
+            <td class="text-nowrap">{{ r.label }}{% if r.differs %} <span class="badge text-bg-warning">differs</span>{% endif %}</td>
+            <td>
+              {% if r.name == 'problem_description' %}
+                <textarea class="form-control form-control-sm" rows="3" name="value_{{ r.name }}">{{ r.new }}</textarea>
+              {% elif r.name == 'status' %}
+                <select class="form-select form-select-sm" name="value_status">
+                  {% for s in statuses %}<option {% if s == r.new %}selected{% endif %}>{{ s }}</option>{% endfor %}
+                </select>
+              {% elif r.name == 'severity' %}
+                <select class="form-select form-select-sm" name="value_severity">
+                  <option value="">-</option>
+                  {% for s in severities %}<option {% if s == r.new %}selected{% endif %}>{{ s }}</option>{% endfor %}
+                </select>
+              {% elif r.name == 'opened_on' %}
+                <input class="form-control form-control-sm" type="date" name="value_opened_on" value="{{ r.new }}">
+              {% else %}
+                <input class="form-control form-control-sm" name="value_{{ r.name }}" value="{{ r.new }}">
+              {% endif %}
+            </td>
+            {% if existing %}<td class="small prewrap text-body-secondary">{{ r.current|truncate(200) }}</td>{% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% if plan.raw_fields %}
+        <details class="small mt-2"><summary>All {{ plan.raw_fields|length }} fields read from the page</summary>
+          <table class="table table-sm mt-2">
+            {% for k, v in plan.raw_fields.items() %}<tr><td class="text-nowrap">{{ k }}</td><td class="prewrap">{{ v|truncate(300) }}</td></tr>{% endfor %}
+          </table>
+        </details>
+      {% endif %}
+    </div>
+  </div>
+
+  <h2 class="h5">To import <span class="badge text-bg-primary">{{ included|length }}</span></h2>
+  <p class="small text-body-secondary">Untick anything you don't want, or change which tab it goes to.
+    {% if plan.engineer %}Messages from <strong>{{ plan.engineer }}</strong> are treated as yours.{% endif %}</p>
+  {% for it in included %}{{ item_card(it, True) }}{% else %}<p class="text-body-secondary">Nothing selected for import.</p>{% endfor %}
+
+  {% if ignored %}
+  <details class="mt-4" {% if not included %}open{% endif %}>
+    <summary class="h5 d-inline">Ignored <span class="badge text-bg-secondary">{{ ignored|length }}</span></summary>
+    <p class="small text-body-secondary mt-2">Follow-ups, acknowledgements, automated posts and answers already attached to
+      scoping questions. Tick any you want after all.</p>
+    {% for it in ignored %}{{ item_card(it, False) }}{% endfor %}
+  </details>
+  {% endif %}
+
+  {% if already %}
+  <details class="mt-3">
+    <summary class="h6 d-inline">Already imported earlier <span class="badge text-bg-light border">{{ already|length }}</span></summary>
+    <div class="mt-2">{% for it in already %}{{ item_card(it, False) }}{% endfor %}</div>
+  </details>
+  {% endif %}
+
+  <div class="position-sticky bottom-0 bg-body border-top py-3 mt-4 d-flex gap-2">
+    <button class="btn btn-primary"><i class="bi bi-box-arrow-in-down"></i> Import into Casework</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('main.dashboard') }}">Cancel</a>
+  </div>
+</form>
+{% endblock %}

@@ -25,9 +25,10 @@ the whole block in.
 11. [Add sample data](#11-add-sample-data)
 12. [Add tests](#12-add-tests)
 13. [Add the production HTTPS server, certificates and backups](#13-add-the-production-https-server-certificates-and-backups)
-14. [Save your work with Git](#14-save-your-work-with-git)
-15. [Next steps](#15-next-steps)
-16. [Troubleshooting](#16-troubleshooting)
+14. [Add Salesforce capture (Chrome extension)](#14-add-salesforce-capture-chrome-extension)
+15. [Save your work with Git](#15-save-your-work-with-git)
+16. [Next steps](#16-next-steps)
+17. [Troubleshooting](#17-troubleshooting)
 
 ---
 
@@ -49,7 +50,7 @@ the whole block in.
    ```
 
    Both should print a version number. If `python` opens the Microsoft Store instead, see
-   [Troubleshooting](#16-troubleshooting).
+   [Troubleshooting](#17-troubleshooting).
 
 ## 2. Create the project in VS Code
 
@@ -233,6 +234,7 @@ class Case(db.Model):
         order_by="Entry.occurred_at",
         lazy="select",
     )
+    imported_items = db.relationship("ImportedItem", cascade="all, delete-orphan", lazy="select")
 
     @property
     def is_closed(self):
@@ -299,6 +301,28 @@ class Entry(db.Model):
         text = self.title or self.question or self.body or ""
         first = text.strip().splitlines()[0] if text.strip() else ""
         return first if len(first) <= 120 else first[:117] + "..."
+
+
+class ImportBatch(db.Model):
+    """A case captured by the Chrome extension, waiting for review."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(32), unique=True, nullable=False, index=True)
+    case_number = db.Column(db.String(64))
+    payload = db.Column(db.Text, nullable=False)  # JSON from the extension
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    applied_at = db.Column(db.DateTime)
+    case_id = db.Column(db.Integer, db.ForeignKey("case.id", ondelete="SET NULL"))
+
+
+class ImportedItem(db.Model):
+    """Remembers which Salesforce feed items were already imported into a case."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey("case.id"), nullable=False, index=True)
+    key = db.Column(db.String(40), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    __table_args__ = (db.UniqueConstraint("case_id", "key"),)
 ```
 
 #### `casework/entry_types.py`
@@ -413,13 +437,18 @@ def create_app(test_config=None):
 
     app.config.setdefault("CASEWORK_USERNAME", os.environ.get("CASEWORK_USERNAME"))
     app.config.setdefault("CASEWORK_PASSWORD", os.environ.get("CASEWORK_PASSWORD"))
+    app.config.setdefault("CASEWORK_API_TOKEN", os.environ.get("CASEWORK_API_TOKEN"))
+    app.config.setdefault("MAX_CONTENT_LENGTH", 20 * 1024 * 1024)
 
     db.init_app(app)
     _install_basic_auth(app)
 
     from . import routes
 
+    from . import imports
+
     app.register_blueprint(routes.bp)
+    app.register_blueprint(imports.bp)
     routes.register_template_helpers(app)
 
     with app.app_context():
@@ -438,8 +467,8 @@ def _install_basic_auth(app):
     @app.before_request
     def _require_login():
         user, pwd = app.config.get("CASEWORK_USERNAME"), app.config.get("CASEWORK_PASSWORD")
-        if not (user and pwd):
-            return None
+        if not (user and pwd) or request.path.startswith("/api/"):
+            return None  # /api/ uses CASEWORK_API_TOKEN instead (see imports.py)
         auth = request.authorization
         if (auth and auth.type == "basic"
                 and hmac.compare_digest((auth.username or "").encode(), user.encode())
@@ -1808,6 +1837,7 @@ at the bottom reopens the right tab after you add or edit something.
       if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
     }
     show(location.hash);
+    window.addEventListener('hashchange', function () { show(location.hash); });
     document.querySelectorAll('#caseTabs [data-bs-toggle="tab"]').forEach(function (btn) {
       btn.addEventListener('shown.bs.tab', function (ev) {
         history.replaceState(null, '', ev.target.getAttribute('data-bs-target'));
@@ -1904,6 +1934,8 @@ A few small style tweaks on top of Bootstrap, including the print layout for rep
   nav.navbar, .btn, .alert, details { display: none !important; }
   .report-text { border: 0; height: auto !important; overflow: visible; }
 }
+
+.import-text { max-height: 14rem; overflow: auto; background: var(--bs-tertiary-bg); padding: .5rem; border-radius: .25rem; }
 ```
 
 #### Download Bootstrap
@@ -2717,7 +2749,1628 @@ python backup.py
 
 It creates `backups\casework-<date-time>.db`.
 
-## 14. Save your work with Git
+## 14. Add Salesforce capture (Chrome extension)
+
+This part lets a Chrome extension read the Salesforce case you have open and send it to
+Casework, which sorts the feed into the tabs and lets you review it before importing.
+
+**Server side.** First, add two tables to the end of `casework/models.py`. The full file in
+step 6 already contains them (`ImportBatch` and `ImportedItem`), along with the
+`imported_items` line in `Case`. If you typed step 6 from an older copy, add them now.
+`casework/__init__.py` (step 6) already registers the `imports` blueprint and the API token
+setting.
+
+
+#### `casework/importer.py`
+
+The brain of the import. It maps Salesforce fields (Subject, Status, Product & Topic,
+Date/Time Opened...) onto Casework's case fields, and sorts each feed item: initial response,
+scoping questions paired with the customer's reply, meetings, troubleshooting, notes, or
+**ignored** (follow-ups, acknowledgements, automated posts, status changes). The phrase lists at
+the top are what you edit to tune it.
+
+```python
+"""Turn a case captured by the Chrome extension into a reviewable import plan.
+
+The extension sends what it could read from the Salesforce case page:
+
+    {
+      "caseNumber": "480570091",
+      "userName": "Sathishkumar Ashok",          # the engineer (optional)
+      "capturedAt": "2026-11-05T10:15:00Z",
+      "fields": [{"label": "Status", "value": "Working"}, ...],
+      "feed":   [{"author": "...", "timeText": "20h ago", "timeTitle": "...", "text": "..."}, ...]
+    }
+
+`build_plan()` maps the fields onto Casework's case fields and sorts every feed item into
+one of the case tabs, or marks it ignored (follow-ups, acknowledgements, automation...).
+Everything here is pure Python so it can be unit-tested and tuned without a browser.
+"""
+
+import hashlib
+import re
+from datetime import date, datetime, timedelta, timezone
+
+from .models import STATUSES
+
+# --------------------------------------------------------------------------- tunables
+# Edit these lists to tune what gets ignored / how items are classified.
+
+AUTOMATION_AUTHORS = [
+    "automation", "system", "auto-response", "autoresponse", "no-reply", "noreply",
+    "do not reply", "workflow", "process builder", "integration user",
+]
+AUTOMATION_TEXT = [
+    r"system generated feed", r"this is an automated (message|response|email)",
+    r"do not reply to this (email|message)", r"auto[- ]?generated",
+]
+STATUS_CHANGE_TEXT = [
+    r"changed (the )?(status|sub-status|owner|priority|severity)", r"\bstatus changed\b",
+    r"changed .+ from .+ to ", r"\bcreated this case\b", r"\bowner changed\b",
+]
+FOLLOW_UP_TEXT = [
+    r"\bjust (a )?(quick |gentle )?(follow(ing)?[- ]?up|checking in)",
+    r"\bfollow(ing)?[- ]?up on\b", r"\b(gentle|friendly|quick) (reminder|follow[- ]?up)\b",
+    r"\bany updates?\b", r"\bchecking in\b", r"\bdid you (get|have) (a|the) chance\b",
+    r"\b(have not|haven'?t|not) heard back\b", r"\bawaiting your (reply|response|update)\b",
+    r"\bplease (provide|share) (an|the|your) update\b", r"\bwanted to check (if|whether)\b",
+    r"\b(will|going to) (close|archive) (this|the) case\b", r"\bcase (will be|has been) (auto[- ]?)?closed\b",
+    r"\bclosing (this|the) case\b", r"\bis it ok(ay)? (if we|to) close\b",
+]
+ACKNOWLEDGEMENT_TEXT = [
+    r"\bthank(s| you)( very much| so much)? for (the |your )?(update|reply|response|sharing|details|"
+    r"information|info|logs|files|confirmation|time|patience)",
+    r"\bI will (check|review|look into|analy[sz]e|go through|get back|update you)",
+    r"\bwe will (check|review|look into|analy[sz]e|get back|update you)",
+    r"\b(noted|received|got it|sounds good|works for me)\b",
+    r"\b(I|we) (have )?received (the|your)\b",
+]
+MEETING_TEXT = [
+    r"\b(remote|screen[- ]?share|zoom|webex|teams|gotomeeting|google meet) (session|call|meeting)\b",
+    r"\bmeeting (summary|notes|minutes|recap)\b", r"\bcall (summary|notes|recap)\b",
+    r"\bas discussed (on|during|in) (the|our) (call|meeting|session)\b",
+    r"\b(on|during) (the|our) (call|meeting|session) (today|yesterday|we)\b",
+    r"\battendees\s*:", r"\bsummary of (the|our|today'?s) (call|meeting|session)\b",
+]
+TECHNICAL_TEXT = [
+    r"\blogs?\b", r"\berror", r"\bexception", r"\bstack ?trace", r"\brepro(duc\w*)?\b",
+    r"\btest(ed|ing)?\b", r"\btried\b", r"\bworkaround", r"\broot cause", r"\bbug\b",
+    r"\bdebug", r"\bconfig(uration)?\b", r"\bdriver", r"\bsteps?\b", r"\bfiddler\b", r"\bhar\b",
+    r"\bsaml\b", r"\bsso\b", r"\bcertificate", r"\bproxy\b", r"\bfirewall\b", r"\bregistry\b",
+    r"\bversion\b", r"\bupgrade", r"\bpatch", r"\bconnection\b", r"\btimeout\b", r"\bcrash",
+    r"\bqueries?\b", r"\bperformance\b", r"\bkb\d+|\bknowledge article\b", r"\bescalat",
+]
+SIGN_OFF = re.compile(
+    r"^(best|kind|warm|warmest)?\s*regards\b.*$|^thanks?( (and|&) regards)?[,!.]?$|^thank you[,!.]?$|"
+    r"^many thanks[,!.]?$|^cheers[,!.]?$|^sincerely[,!.]?$|^br[,.]?$|^--\s*$|^__+$",
+    re.I,
+)
+QUOTE_START = re.compile(
+    r"^on .{5,200} wrote:$|^-{2,}\s*original message|^-{2,}\s*forwarded message|"
+    r"^from:\s.+|^sent:\s.+|^\s*>|^ref:[_!]|^thread::",
+    re.I,
+)
+GREETING = re.compile(r"^(hi|hello|hey|dear|good (morning|afternoon|evening))\b[^.!?]{0,60}[,!.]?$", re.I)
+UI_NOISE = re.compile(
+    r"^(comment|like|liked|share|reply|reply all|forward|more|less|show more|show less|see more|"
+    r"collapse post|expand post|edit|delete|bookmark|view more|view all|copy link|"
+    r"actions for this (post|email|item).*|\d+ (comments?|likes?|views?)|write a comment\.*|"
+    r"to: (all|internal|all with access)|internal|public|email|post|you|\.\.\.|·)$",
+    re.I,
+)
+TIME_TEXT = re.compile(
+    r"^(\d+\s*(s|sec|m|min|mins|h|hr|hrs|d|day|days|w|wk|wks)\s*ago|just now|yesterday.*|today.*|"
+    r"[A-Z][a-z]+ \d{1,2},? \d{4}.*|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}.*)$",
+    re.I,
+)
+
+FIELD_ALIASES = {
+    "case_number": ["case number", "case no", "case #", "case id"],
+    "title": ["subject", "case subject", "title"],
+    "problem_description": ["description", "case description", "problem description", "issue description"],
+    "status": ["status", "case status"],
+    "sub_status": ["sub-status", "sub status", "substatus"],
+    "severity": ["severity", "priority", "case severity", "case priority"],
+    "product": ["product & topic", "product and topic", "product", "product name", "product/topic"],
+    "product_feature": ["product feature", "feature", "topic", "component"],
+    "version": ["version", "product version", "software version", "tableau version", "release"],
+    "operating_system": ["operating system", "os", "platform", "os version", "operating system version"],
+    "customer": ["account name", "account", "company", "customer", "organization"],
+    "opened_on": ["date/time opened", "date time opened", "opened date", "date opened",
+                  "created date", "case created date", "opened"],
+}
+CASE_FIELD_LABELS = {
+    "case_number": "Case number", "title": "Title", "customer": "Customer", "product": "Product",
+    "version": "Version", "operating_system": "Operating system", "severity": "Severity",
+    "status": "Status", "opened_on": "Opened on", "problem_description": "Problem description",
+}
+
+CATEGORIES = ["initial_response", "scoping", "troubleshooting", "meeting", "note"]
+
+
+def _any(patterns, text):
+    return any(re.search(p, text, re.I) for p in patterns)
+
+
+# --------------------------------------------------------------------------- fields
+
+def _norm_label(label):
+    label = re.sub(r"[*:]+", " ", label or "")
+    label = re.sub(r"\b(help|info|edit)\b.*$", "", label, flags=re.I)
+    return re.sub(r"\s+", " ", label).strip().lower()
+
+
+def _clean_value(value):
+    lines = [ln.strip() for ln in (value or "").splitlines()]
+    lines = [ln for ln in lines if ln and not re.match(r"^(edit|change|open|help|view|preview)\b.{0,60}$", ln, re.I)]
+    return "\n".join(lines).strip()
+
+
+def map_fields(fields):
+    """Map Salesforce label/value pairs onto Casework field names. First match wins."""
+    by_label = {}
+    for f in fields or []:
+        label, value = _norm_label(f.get("label")), _clean_value(f.get("value"))
+        if label and value and label not in by_label:
+            by_label[label] = value
+    mapped = {}
+    for name, aliases in FIELD_ALIASES.items():
+        for alias in aliases:
+            if alias in by_label:
+                mapped[name] = by_label[alias]
+                break
+    return mapped, by_label
+
+
+def map_status(value):
+    v = (value or "").strip().lower()
+    for s in STATUSES:
+        if v == s.lower():
+            return s
+    if not v:
+        return None
+    if v in ("new", "open", "unassigned"):
+        return "New"
+    if "customer" in v or "pending" in v or "waiting" in v or "on hold" in v:
+        return "Waiting on Customer"
+    if "closed" in v:
+        return "Closed"
+    if "resolved" in v or "solution" in v or "solved" in v:
+        return "Resolved"
+    if "swarm" in v:
+        return "Swarm"
+    if "investigation" in v:
+        return "Structured Investigation"
+    return "In Progress"
+
+
+def map_severity(value):
+    v = (value or "").lower()
+    if not v:
+        return None
+    if re.search(r"\b1\b|critical|urgent|sev ?1|p1", v):
+        return "1 - Critical"
+    if re.search(r"\b2\b|high|sev ?2|p2", v):
+        return "2 - High"
+    if re.search(r"\b3\b|medium|normal|sev ?3|p3", v):
+        return "3 - Medium"
+    if re.search(r"\b4\b|low|sev ?4|p4", v):
+        return "4 - Low"
+    return None
+
+
+VERSION_RE = re.compile(
+    r"\b(?:version|ver\.?|release)\s*[:#-]?\s*(\d{1,4}(?:\.\d+){1,3})\b|\b(20\d\d\.\d(?:\.\d+)?)\b", re.I
+)
+OS_RE = re.compile(
+    r"\b(windows server \d{4}(?: r2)?|windows (?:10|11|7|8\.1)|mac ?os(?: x)?(?: \d+(?:\.\d+)*| [a-z]+)?|"
+    r"os x [\d.]+|ubuntu(?: \d+\.\d+)?|rhel ?\d*(?:\.\d+)?|red hat(?: enterprise linux)?(?: \d+(?:\.\d+)?)?|"
+    r"centos(?: \d+)?|amazon linux(?: \d+)?|linux|ios \d+|android \d+)\b",
+    re.I,
+)
+
+
+def _guess_version(*texts):
+    for t in texts:
+        m = VERSION_RE.search(t or "")
+        if m:
+            return m.group(1) or m.group(2)
+    return None
+
+
+def _guess_os(*texts):
+    for t in texts:
+        m = OS_RE.search(t or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+MONTH_FIRST = ["%m/%d/%Y, %I:%M %p", "%m/%d/%Y %I:%M %p", "%m/%d/%Y, %H:%M", "%m/%d/%Y %H:%M", "%m/%d/%Y"]
+DAY_FIRST = ["%d/%m/%Y, %I:%M %p", "%d/%m/%Y %I:%M %p", "%d/%m/%Y, %H:%M", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+             "%d.%m.%Y, %H:%M", "%d.%m.%Y %H:%M", "%d.%m.%Y"]
+DATE_FORMATS = [
+    "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d", "%B %d, %Y at %I:%M %p",
+    "%B %d, %Y, %I:%M %p", "%B %d, %Y %I:%M %p", "%b %d, %Y, %I:%M %p", "%b %d, %Y at %I:%M %p",
+    "%B %d, %Y", "%b %d, %Y", "%d %B %Y at %H:%M", "%d %b %Y, %H:%M", "%d %B %Y", "%d %b %Y",
+    "%d-%b-%Y %H:%M", "%d-%b-%Y",
+]
+
+
+def parse_datetime(text, now, day_first=False):
+    """Parse an absolute or relative Salesforce timestamp. Returns naive local datetime or None.
+
+    `day_first` decides how 2/11/2026 is read (see detect_day_first)."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    t = re.sub(r"\s*\((GMT|UTC)[^)]*\)$", "", t)
+    t = re.sub(r"\s+(GMT|UTC|[A-Z]{2,4}T)([+-]\d{1,2}(:?\d{2})?)?$", "", t)
+    if not t:
+        return None
+    m = re.match(r"^(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|d|day|days|w|wk|wks)\s*ago$", t, re.I)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        delta = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}[unit[0]]
+        return now - timedelta(**{delta: n})
+    if t.lower() == "just now":
+        return now
+    m = re.match(r"^(today|yesterday)(?: at)? (\d{1,2}:\d{2}(?: ?[AP]M)?)$", t, re.I)
+    if m:
+        base = now.date() - timedelta(days=1 if m.group(1).lower() == "yesterday" else 0)
+        clock = m.group(2).upper().replace(" ", "")
+        for fmt in ("%I:%M%p", "%H:%M"):
+            try:
+                return datetime.combine(base, datetime.strptime(clock, fmt).time())
+            except ValueError:
+                pass
+    try:
+        dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+        return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
+    except ValueError:
+        pass
+    numeric = (DAY_FIRST + MONTH_FIRST) if day_first else (MONTH_FIRST + DAY_FIRST)
+    for fmt in numeric + DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(t, fmt)
+        except ValueError:
+            continue
+        # Something that already happened can't be in the future: try day and month swapped.
+        if fmt in numeric and parsed > now + timedelta(days=1) and parsed.day <= 12:
+            swapped = parsed.replace(month=parsed.day, day=parsed.month)
+            if swapped <= now + timedelta(days=1):
+                return swapped
+        return parsed
+    return None
+
+
+NUMERIC_DATE = re.compile(r"\b(\d{1,2})[/.](\d{1,2})[/.](\d{4})\b")
+RELATIVE = re.compile(r"^\d+\s*[a-z]+\s*ago$|^(today|yesterday)\b", re.I)
+
+
+def detect_day_first(payload, now):
+    """Work out whether this Salesforce shows dates as day/month or month/day."""
+    texts = [f.get("value") or "" for f in payload.get("fields") or []]
+    texts += [i.get("timeTitle") or "" for i in payload.get("feed") or []]
+    for t in texts:
+        for a, b, _ in NUMERIC_DATE.findall(t):
+            if int(a) > 12 >= int(b):
+                return True
+            if int(b) > 12 >= int(a):
+                return False
+    # Compare each post's exact date with its "3d ago" label: only one reading will agree.
+    votes = 0
+    for i in payload.get("feed") or []:
+        rel, title = i.get("timeText") or "", i.get("timeTitle") or ""
+        if not (RELATIVE.match(rel.strip()) and NUMERIC_DATE.search(title)):
+            continue
+        approx = parse_datetime(rel, now)
+        md, dm = parse_datetime(title, now, False), parse_datetime(title, now, True)
+        if approx and md and dm and md != dm:
+            votes += 1 if abs(dm - approx) < abs(md - approx) else -1
+    return votes > 0
+
+
+# --------------------------------------------------------------------------- feed items
+
+def _lines(text):
+    return [re.sub(r"[ \t ]+", " ", ln).strip() for ln in (text or "").replace("\r", "").split("\n")]
+
+
+def strip_noise(text, author=None):
+    """Remove feed chrome (author, 'To: All', timestamps, Like/Comment buttons) from an item's text."""
+    out = []
+    a = (author or "").strip().lower()
+    for i, ln in enumerate(_lines(text)):
+        if not ln:
+            out.append("")
+            continue
+        if UI_NOISE.match(ln) or (a and ln.lower() == a and i < 4) or (i < 6 and TIME_TEXT.match(ln)):
+            continue
+        out.append(ln)
+    text = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def split_email_header(text):
+    """If the item is an email, return (headers dict, body). Otherwise ({}, text)."""
+    lines = text.split("\n")
+    headers, i = {}, 0
+    while i < len(lines) and i < 12:
+        m = re.match(r"^(from|to|cc|bcc|subject|sent|date)\s*:\s*(.*)$", lines[i], re.I)
+        if m:
+            headers[m.group(1).lower()] = m.group(2).strip()
+        elif lines[i].strip() and headers:
+            break
+        i += 1
+    if "from" in headers or "subject" in headers:
+        return headers, "\n".join(lines[i:]).strip()
+    return {}, text
+
+
+def clean_body(text):
+    """Drop greeting, quoted earlier messages and the signature, keeping the actual message."""
+    kept = []
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if kept and QUOTE_START.match(s):
+            break
+        if s.startswith(">"):
+            continue
+        if SIGN_OFF.match(s) and any(k.strip() for k in kept):
+            break
+        kept.append(ln)
+    while kept and (not kept[0].strip() or GREETING.match(kept[0].strip())):
+        kept.pop(0)
+    body = "\n".join(kept).strip()
+    return re.sub(r"\n{3,}", "\n\n", body)
+
+
+def extract_questions(text):
+    qs = []
+    asks = re.search(r"\b(please (provide|confirm|share|send|let (me|us) know|check)|could you|can you)\b", text, re.I)
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if len(s) < 8:
+            continue
+        if s.endswith("?") or (asks and re.match(r"^(\d+[.)]|[-*•])\s+\S", s)):
+            qs.append(s)
+    return qs
+
+
+def _words(text):
+    return len(re.findall(r"\w+", text))
+
+
+def item_key(item):
+    raw = "|".join([
+        (item.get("author") or "").strip().lower(),
+        (item.get("timeTitle") or item.get("timeText") or "").strip().lower(),
+        re.sub(r"\s+", " ", (item.get("text") or "")).strip()[:400].lower(),
+    ])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def _title(body, fallback):
+    first = next((ln.strip() for ln in body.split("\n") if ln.strip()), "")
+    first = re.sub(r"\s+", " ", first)
+    if not first:
+        return fallback
+    return first if len(first) <= 80 else first[:77].rsplit(" ", 1)[0] + "..."
+
+
+def classify_item(raw, engineer, now, day_first=False):
+    """Analyse one feed item. Returns a dict describing it and why it is kept or ignored."""
+    author = (raw.get("author") or "").strip()
+    full = raw.get("text") or ""
+    visibility = None
+    m = re.search(r"^\s*to:\s*(all with access|all|internal)\s*$", full, re.I | re.M)
+    if m:
+        visibility = "internal" if m.group(1).lower() == "internal" else "public"
+    text = strip_noise(full, author)
+    if not author:
+        first = next((ln for ln in text.split("\n") if ln.strip()), "")
+        if 2 <= len(first.split()) <= 5 and not first.endswith((".", "?", ":")):
+            author, text = first.strip(), text.split("\n", 1)[1] if "\n" in text else ""
+    headers, body = split_email_header(text)
+    kind = "email" if headers else "post"
+    if headers.get("from") and not author:
+        author = re.sub(r"<.*?>", "", headers["from"]).strip()
+    clean = clean_body(body)
+    when = (parse_datetime(raw.get("timeTitle"), now, day_first) or parse_datetime(raw.get("timeText"), now, day_first))
+
+    a = author.lower()
+    if any(k in a for k in AUTOMATION_AUTHORS):
+        direction = "system"
+    elif engineer and (a == engineer.lower() or engineer.lower() in a
+                       or (headers.get("from") and engineer.lower() in headers["from"].lower())):
+        direction = "outbound"
+    else:
+        direction = "inbound"
+
+    item = {
+        "key": item_key(raw), "author": author or "Unknown", "when": when, "kind": kind,
+        "visibility": visibility, "direction": direction, "subject": headers.get("subject"),
+        "clean": clean, "words": _words(clean), "include": True, "reason": None,
+        "category": "note", "title": None, "question": None, "response": None, "consumed_by": None,
+    }
+
+    def ignore(reason):
+        item.update(include=False, reason=reason)
+        return item
+
+    if direction == "system" or _any(AUTOMATION_TEXT, full):
+        return ignore("Automated / system message")
+    if _any(STATUS_CHANGE_TEXT, clean) and item["words"] < 40:
+        return ignore("Status or field change")
+    if item["words"] < 6:
+        return ignore("Too short to be useful")
+    if item["words"] < 80 and _any(FOLLOW_UP_TEXT, clean):
+        return ignore("Follow-up / reminder")
+    if item["words"] < 60 and _any(ACKNOWLEDGEMENT_TEXT, clean) and not extract_questions(clean):
+        return ignore("Acknowledgement with no new information")
+
+    questions = extract_questions(clean)
+    if _any(MEETING_TEXT, clean):
+        item.update(category="meeting", title=_title(clean, "Meeting"))
+    elif direction == "outbound" and questions:
+        item.update(category="scoping", question="\n".join(questions))
+    elif direction == "outbound" and visibility == "internal":
+        item.update(category="troubleshooting" if _any(TECHNICAL_TEXT, clean) else "note",
+                    title=_title(clean, "Internal note"))
+    elif direction == "outbound" and _any(TECHNICAL_TEXT, clean):
+        item.update(category="troubleshooting", title=_title(clean, "Troubleshooting update"))
+    elif direction == "inbound":
+        item.update(category="note", title=f"Customer update from {author or 'customer'}")
+    else:
+        item.update(category="note", title=_title(clean, "Update"))
+    if questions:
+        item["question"] = "\n".join(questions)
+    return item
+
+
+def build_plan(payload, already_imported=frozenset(), now=None):
+    """Full import plan: mapped case fields + every feed item classified, oldest first."""
+    now = now or datetime.now()
+    # Relative times ("20h ago") are relative to when the page was captured, not to now.
+    now = parse_datetime(payload.get("capturedAt") or "", now) or now
+
+    day_first = detect_day_first(payload, now)
+    mapped, raw_fields = map_fields(payload.get("fields"))
+    engineer = (payload.get("userName") or "").strip() or None
+    owner = raw_fields.get("case owner") or raw_fields.get("owner") or raw_fields.get("owner name")
+    if not engineer and owner:
+        engineer = owner.split("\n")[0].strip()
+
+    case_number = (payload.get("caseNumber") or mapped.get("case_number") or "").strip()
+    if not case_number:
+        m = re.search(r"\b(\d{5,})\b", payload.get("title") or "")
+        case_number = m.group(1) if m else ""
+
+    product = mapped.get("product")
+    if product and mapped.get("product_feature"):
+        product = f"{product} / {mapped['product_feature']}"
+    elif not product:
+        product = mapped.get("product_feature")
+    description = mapped.get("problem_description")
+    opened = parse_datetime(mapped.get("opened_on"), now, day_first)
+
+    case = {
+        "case_number": case_number or None,
+        "title": mapped.get("title"),
+        "customer": (mapped.get("customer") or "").split("\n")[0] or None,
+        "product": product,
+        "version": mapped.get("version") or _guess_version(description, mapped.get("title")),
+        "operating_system": mapped.get("operating_system") or _guess_os(description, mapped.get("title")),
+        "severity": map_severity(mapped.get("severity")),
+        "status": map_status(mapped.get("status")),
+        "opened_on": opened.date() if opened else None,
+        "problem_description": description,
+    }
+
+    # Salesforce shows newest first; reverse so ties keep chronological order, then sort by time.
+    raw_items = list(reversed(payload.get("feed") or []))
+    items = [classify_item(r, engineer, now, day_first) for r in raw_items]
+    items.sort(key=lambda i: i["when"] or datetime.max)
+
+    seen = set()
+    for it in items:
+        if it["key"] in seen:
+            it.update(include=False, reason="Duplicate of another item")
+        seen.add(it["key"])
+        if it["key"] in already_imported:
+            it.update(include=False, reason="Already imported", already=True)
+
+    # First substantive outbound message becomes the initial response.
+    first_out = next((i for i in items if i["include"] and i["direction"] == "outbound"
+                      and i["visibility"] != "internal" and i["category"] != "meeting"), None)
+    if first_out:
+        first_out.update(category="initial_response", title=first_out["subject"] or "Initial response")
+
+    # Pair each set of scoping questions with the customer's next reply.
+    for idx, it in enumerate(items):
+        if not (it["include"] and it["question"] and it["category"] in ("scoping", "initial_response")):
+            continue
+        for nxt in items[idx + 1:]:
+            if nxt["direction"] == "outbound" and nxt["include"]:
+                break
+            if nxt["direction"] == "inbound" and nxt["include"] and not nxt["consumed_by"]:
+                it["response"] = nxt["clean"]
+                nxt.update(include=False, consumed_by=it["key"],
+                           reason="Used as the answer to the scoping questions above")
+                break
+
+    return {
+        "case": case,
+        "engineer": engineer,
+        "items": items,
+        "raw_fields": raw_fields,
+        "warnings": list(payload.get("warnings") or []),
+        "counts": {
+            "total": len(items),
+            "included": sum(1 for i in items if i["include"]),
+            "ignored": sum(1 for i in items if not i["include"]),
+        },
+    }
+```
+
+#### `casework/imports.py`
+
+The `/api/import` endpoint the extension sends to (protected by `CASEWORK_API_TOKEN`), and
+the review page where you confirm what gets imported.
+
+```python
+"""Import cases captured by the Chrome extension: API endpoint + review screen."""
+
+import hmac
+import json
+import secrets
+from datetime import date, datetime, timedelta
+
+from flask import (
+    Blueprint,
+    abort,
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
+
+from .entry_types import ENTRY_TYPES
+from .importer import CASE_FIELD_LABELS, CATEGORIES, build_plan
+from .models import SEVERITIES, STATUSES, Case, Entry, ImportBatch, ImportedItem, db
+
+bp = Blueprint("imports", __name__)
+
+
+# --------------------------------------------------------------------------- API
+
+@bp.after_app_request
+def _cors_for_extension(response):
+    """Let the Chrome extension call /api/ (it is still protected by the API token)."""
+    origin = request.headers.get("Origin", "")
+    if request.path.startswith("/api/") and origin.startswith("chrome-extension://"):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+def _api_allowed():
+    token = current_app.config.get("CASEWORK_API_TOKEN")
+    if token:
+        header = request.headers.get("Authorization", "")
+        given = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        return hmac.compare_digest(given.encode(), token.encode())
+    # No token configured: only allowed when the app has no login either (local, single-user use).
+    return not (current_app.config.get("CASEWORK_USERNAME") and current_app.config.get("CASEWORK_PASSWORD"))
+
+
+def _api_denied():
+    msg = ("Invalid or missing API token." if current_app.config.get("CASEWORK_API_TOKEN")
+           else "This server has a login, so set CASEWORK_API_TOKEN on the server and the same token in the extension.")
+    return jsonify(ok=False, error=msg), 401
+
+
+@bp.route("/api/ping")
+def api_ping():
+    if not _api_allowed():
+        return _api_denied()
+    return jsonify(ok=True, app="casework")
+
+
+@bp.route("/api/import", methods=["POST"])
+def api_import():
+    if not _api_allowed():
+        return _api_denied()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not (data.get("feed") or data.get("fields")):
+        return jsonify(ok=False, error="Nothing to import: no case fields or feed items were captured."), 400
+
+    # Tidy up captures that were never reviewed (older than 30 days).
+    ImportBatch.query.filter(ImportBatch.applied_at.is_(None),
+                             ImportBatch.created_at < datetime.now() - timedelta(days=30)).delete()
+    plan = build_plan(data)
+    batch = ImportBatch(token=secrets.token_urlsafe(16), case_number=plan["case"]["case_number"],
+                        payload=json.dumps(data))
+    db.session.add(batch)
+    db.session.commit()
+    return jsonify(
+        ok=True,
+        caseNumber=plan["case"]["case_number"],
+        counts=plan["counts"],
+        reviewUrl=url_for("imports.review", token=batch.token, _external=True),
+    )
+
+
+# --------------------------------------------------------------------------- review
+
+def _load(token):
+    batch = ImportBatch.query.filter_by(token=token).first() or abort(404)
+    payload = json.loads(batch.payload)
+    number = build_plan(payload)["case"]["case_number"]
+    existing = Case.query.filter_by(case_number=number).first() if number else None
+    already = {i.key for i in existing.imported_items} if existing else set()
+    plan = build_plan(payload, already_imported=already)
+    return batch, payload, plan, existing
+
+
+def _field_rows(plan, existing):
+    rows = []
+    for name, label in CASE_FIELD_LABELS.items():
+        new = plan["case"].get(name)
+        cur = getattr(existing, name) if existing else None
+        if isinstance(new, date):
+            new = new.isoformat()
+        if isinstance(cur, date):
+            cur = cur.isoformat()
+        if name == "case_number" and existing:
+            continue
+        rows.append({
+            "name": name, "label": label, "new": new or "", "current": cur or "",
+            "checked": bool(new) and (not existing or not cur),
+            "differs": bool(new) and bool(cur) and str(new).strip() != str(cur).strip(),
+        })
+    return rows
+
+
+@bp.route("/import/<token>", methods=["GET"])
+def review(token):
+    batch, payload, plan, existing = _load(token)
+    if batch.applied_at:
+        flash("This capture was already imported.", "info")
+        if batch.case_id and db.session.get(Case, batch.case_id):
+            return redirect(url_for("main.case_detail", case_id=batch.case_id))
+    return render_template(
+        "import_review.html", batch=batch, payload=payload, plan=plan, existing=existing,
+        rows=_field_rows(plan, existing), categories=CATEGORIES, statuses=STATUSES, severities=SEVERITIES,
+    )
+
+
+def _apply_fields(case, form, is_new):
+    for name in CASE_FIELD_LABELS:
+        if name == "case_number" and not is_new:
+            continue
+        if not form.get(f"apply_{name}"):
+            continue
+        value = (form.get(f"value_{name}") or "").strip()
+        if not value:
+            continue
+        if name == "opened_on":
+            try:
+                case.opened_on = datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                flash(f"Ignored invalid opened date '{value}' (use YYYY-MM-DD).", "warning")
+        elif name == "status":
+            if value in STATUSES:
+                case.status = value
+        elif name == "severity":
+            if value in SEVERITIES:
+                case.severity = value
+        else:
+            setattr(case, name, value)
+
+
+def _entries_for(item, category):
+    when = item["when"] or datetime.now()
+    body = item["clean"]
+    if category == "initial_response":
+        out = [Entry(entry_type="initial_response", occurred_at=when, title=item["title"] or item["subject"],
+                     body=body)]
+        if item["question"]:
+            out.append(Entry(entry_type="scoping", occurred_at=when, question=item["question"],
+                             response=item["response"]))
+        return out
+    if category == "scoping":
+        return [Entry(entry_type="scoping", occurred_at=when, question=item["question"] or body,
+                      response=item["response"])]
+    if item["response"]:
+        body += f"\n\nCustomer reply:\n{item['response']}"
+    title = item["title"] or item["subject"] or ENTRY_TYPES[category]["singular"].capitalize()
+    return [Entry(entry_type=category, occurred_at=when, title=title[:255], body=body)]
+
+
+@bp.route("/import/<token>", methods=["POST"])
+def apply(token):
+    batch, payload, plan, existing = _load(token)
+    if batch.applied_at:
+        flash("This capture was already imported.", "info")
+        return redirect(url_for("main.dashboard"))
+    form = request.form
+
+    case = existing
+    if case is None:
+        case = Case(status="In Progress", opened_on=date.today())
+        _apply_fields(case, form, is_new=True)
+        if not case.case_number:
+            case.case_number = (form.get("value_case_number") or plan["case"]["case_number"] or "").strip()
+        if not case.case_number:
+            flash("A case number is needed to create the case.", "danger")
+            return redirect(url_for("imports.review", token=token))
+        if Case.query.filter_by(case_number=case.case_number).first():
+            flash(f"Case {case.case_number} already exists.", "danger")
+            return redirect(url_for("imports.review", token=token))
+        case.title = case.title or f"Case {case.case_number}"
+        case.product = case.product or "Unknown"
+        db.session.add(case)
+    else:
+        _apply_fields(case, form, is_new=False)
+
+    known = {i.key for i in case.imported_items}
+    added = 0
+    for item in plan["items"]:
+        if not form.get(f"include_{item['key']}"):
+            continue
+        category = form.get(f"cat_{item['key']}")
+        if category not in CATEGORIES:
+            category = item["category"]
+        for entry in _entries_for(item, category):
+            entry.case = case
+            db.session.add(entry)
+            added += 1
+        keys = {item["key"]} | {i["key"] for i in plan["items"] if i["consumed_by"] == item["key"]}
+        for k in keys - known:
+            case.imported_items.append(ImportedItem(key=k))
+            known.add(k)
+
+    batch.applied_at = datetime.now()
+    db.session.flush()
+    batch.case_id = case.id
+    db.session.commit()
+    flash(f"Imported {added} entr{'y' if added == 1 else 'ies'} into case {case.case_number}.", "success")
+    return redirect(url_for("main.case_detail", case_id=case.id) + "#tab-timeline")
+```
+
+#### `casework/templates/import_review.html`
+
+The review screen: case fields to apply, items to import (with the tab each goes to), and the ignored items with reasons.
+
+```jinja
+{% extends "base.html" %}
+{% block title %}Review import{% endblock %}
+
+{% macro direction_badge(it) %}
+  {% if it.direction == 'outbound' %}<span class="badge text-bg-primary">You</span>
+  {% elif it.direction == 'inbound' %}<span class="badge text-bg-success">Customer</span>
+  {% else %}<span class="badge text-bg-secondary">System</span>{% endif %}
+  {% if it.visibility == 'internal' %}<span class="badge text-bg-warning">Internal</span>{% endif %}
+  {% if it.kind == 'email' %}<span class="badge text-bg-light border">Email</span>{% endif %}
+{% endmacro %}
+
+{% macro item_card(it, checked) %}
+  <div class="card mb-2 import-item {% if not checked %}opacity-75{% endif %}">
+    <div class="card-body py-2">
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+        <input class="form-check-input mt-0" type="checkbox" name="include_{{ it.key }}" value="1"
+               id="inc-{{ it.key }}" {% if checked %}checked{% endif %}>
+        <label class="fw-semibold" for="inc-{{ it.key }}">{{ it.author }}</label>
+        {{ direction_badge(it) }}
+        <span class="text-body-secondary small">{{ it.when|dt if it.when else 'time unknown' }}</span>
+        {% if it.reason %}<span class="badge text-bg-light border text-wrap">{{ it.reason }}</span>{% endif %}
+        <select class="form-select form-select-sm ms-auto w-auto" name="cat_{{ it.key }}" aria-label="Import as">
+          {% for c in categories %}
+            <option value="{{ c }}" {% if c == it.category %}selected{% endif %}>{{ ENTRY_TYPES[c].label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% if it.subject %}<div class="small"><strong>Subject:</strong> {{ it.subject }}</div>{% endif %}
+      {% if it.question and it.category in ('scoping', 'initial_response') %}
+        <div class="small mt-1"><strong>Scoping questions:</strong></div>
+        <div class="prewrap small import-text">{{ it.question }}</div>
+        <div class="small mt-1"><strong>Customer answer:</strong></div>
+        <div class="prewrap small import-text">{{ it.response or 'No reply found yet.' }}</div>
+        {% if it.category == 'initial_response' %}
+          <details class="small mt-1"><summary>Full message</summary><div class="prewrap import-text">{{ it.clean }}</div></details>
+        {% endif %}
+      {% else %}
+        <div class="prewrap small import-text">{{ it.clean or '(empty)' }}</div>
+      {% endif %}
+    </div>
+  </div>
+{% endmacro %}
+
+{% block content %}
+{% set included = plan['items']|selectattr('include')|list %}
+{% set already = plan['items']|selectattr('already')|list %}
+{% set ignored = plan['items']|rejectattr('include')|rejectattr('already')|list %}
+
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <h1 class="h4 mb-0">Review import · Case {{ plan.case.case_number or '(no number found)' }}</h1>
+  {% if existing %}
+    <span class="badge text-bg-info">Updating existing case</span>
+  {% else %}
+    <span class="badge text-bg-success">New case</span>
+  {% endif %}
+  {% if payload.url %}<a class="ms-auto small" href="{{ payload.url }}" target="_blank" rel="noopener">Open in Salesforce</a>{% endif %}
+</div>
+
+{% for w in plan.warnings %}<div class="alert alert-warning py-2">{{ w }}</div>{% endfor %}
+{% if not plan['items'] %}
+  <div class="alert alert-warning">No feed items were captured. Make sure the case feed is visible
+    (e.g. the <em>All Updates</em> tab) before capturing.</div>
+{% endif %}
+
+<form method="post">
+  <div class="card mb-4">
+    <div class="card-header fw-semibold">Case details</div>
+    <div class="card-body">
+      <p class="small text-body-secondary mb-2">Ticked fields are written to the case. You can edit the values first.
+        {% if existing %}Fields that already have a value in Casework are unticked by default.{% endif %}</p>
+      <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead><tr><th style="width:2rem"></th><th>Field</th><th>From Salesforce</th>{% if existing %}<th>Currently in Casework</th>{% endif %}</tr></thead>
+        <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><input class="form-check-input" type="checkbox" name="apply_{{ r.name }}" value="1" {% if r.checked %}checked{% endif %} aria-label="Apply {{ r.label }}"></td>
+            <td class="text-nowrap">{{ r.label }}{% if r.differs %} <span class="badge text-bg-warning">differs</span>{% endif %}</td>
+            <td>
+              {% if r.name == 'problem_description' %}
+                <textarea class="form-control form-control-sm" rows="3" name="value_{{ r.name }}">{{ r.new }}</textarea>
+              {% elif r.name == 'status' %}
+                <select class="form-select form-select-sm" name="value_status">
+                  {% for s in statuses %}<option {% if s == r.new %}selected{% endif %}>{{ s }}</option>{% endfor %}
+                </select>
+              {% elif r.name == 'severity' %}
+                <select class="form-select form-select-sm" name="value_severity">
+                  <option value="">-</option>
+                  {% for s in severities %}<option {% if s == r.new %}selected{% endif %}>{{ s }}</option>{% endfor %}
+                </select>
+              {% elif r.name == 'opened_on' %}
+                <input class="form-control form-control-sm" type="date" name="value_opened_on" value="{{ r.new }}">
+              {% else %}
+                <input class="form-control form-control-sm" name="value_{{ r.name }}" value="{{ r.new }}">
+              {% endif %}
+            </td>
+            {% if existing %}<td class="small prewrap text-body-secondary">{{ r.current|truncate(200) }}</td>{% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% if plan.raw_fields %}
+        <details class="small mt-2"><summary>All {{ plan.raw_fields|length }} fields read from the page</summary>
+          <table class="table table-sm mt-2">
+            {% for k, v in plan.raw_fields.items() %}<tr><td class="text-nowrap">{{ k }}</td><td class="prewrap">{{ v|truncate(300) }}</td></tr>{% endfor %}
+          </table>
+        </details>
+      {% endif %}
+    </div>
+  </div>
+
+  <h2 class="h5">To import <span class="badge text-bg-primary">{{ included|length }}</span></h2>
+  <p class="small text-body-secondary">Untick anything you don't want, or change which tab it goes to.
+    {% if plan.engineer %}Messages from <strong>{{ plan.engineer }}</strong> are treated as yours.{% endif %}</p>
+  {% for it in included %}{{ item_card(it, True) }}{% else %}<p class="text-body-secondary">Nothing selected for import.</p>{% endfor %}
+
+  {% if ignored %}
+  <details class="mt-4" {% if not included %}open{% endif %}>
+    <summary class="h5 d-inline">Ignored <span class="badge text-bg-secondary">{{ ignored|length }}</span></summary>
+    <p class="small text-body-secondary mt-2">Follow-ups, acknowledgements, automated posts and answers already attached to
+      scoping questions. Tick any you want after all.</p>
+    {% for it in ignored %}{{ item_card(it, False) }}{% endfor %}
+  </details>
+  {% endif %}
+
+  {% if already %}
+  <details class="mt-3">
+    <summary class="h6 d-inline">Already imported earlier <span class="badge text-bg-light border">{{ already|length }}</span></summary>
+    <div class="mt-2">{% for it in already %}{{ item_card(it, False) }}{% endfor %}</div>
+  </details>
+  {% endif %}
+
+  <div class="position-sticky bottom-0 bg-body border-top py-3 mt-4 d-flex gap-2">
+    <button class="btn btn-primary"><i class="bi bi-box-arrow-in-down"></i> Import into Casework</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('main.dashboard') }}">Cancel</a>
+  </div>
+</form>
+{% endblock %}
+```
+
+Add this line to the end of `casework/static/style.css` (the full file in step 9 already has it):
+
+```css
+.import-text { max-height: 14rem; overflow: auto; background: var(--bs-tertiary-bg); padding: .5rem; border-radius: .25rem; }
+```
+
+**The extension.** Create a folder `chrome-extension` in the project root, and `chrome-extension\icons`
+inside it, then add these files:
+
+
+#### `chrome-extension/manifest.json`
+
+Tells Chrome what the extension is and what it may do: run on the tab you click it in (`activeTab`), inject a script (`scripting`), and save settings (`storage`).
+
+```jsonc
+{
+  "manifest_version": 3,
+  "name": "Casework Capture",
+  "version": "1.0.0",
+  "description": "Send the Salesforce case you're viewing (details and case feed) to your Casework app for review and import.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send this case to Casework",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "options_page": "options.html",
+  "background": { "service_worker": "background.js" },
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+}
+```
+
+#### `chrome-extension/extractor.js`
+
+Runs inside the Salesforce page. Salesforce Lightning hides most of the page inside *shadow DOM*,
+so this walks into it to find the case fields and feed posts. It only reads visible elements,
+so other console tabs open in the background are ignored. It can also click **Show More** and
+**View More** so the whole feed is captured.
+
+```
+/*
+ * Reads the case that is open in the Salesforce Lightning console.
+ * Injected into the page by popup.js; defines window.__caseworkExtract(options).
+ *
+ * Lightning renders most of the page inside (synthetic or native) shadow DOM, so normal
+ * document.querySelectorAll() can't see it. Everything here walks shadow roots, and only
+ * looks at elements that are visible, so other console tabs open in the background
+ * (which Salesforce keeps in the page but hides) are ignored.
+ */
+(function () {
+  'use strict';
+
+  var FIELD_ITEM = 'records-record-layout-item, .slds-form-element, force-record-layout-item, .forcePageBlockItem';
+  var FIELD_LABEL = '.test-id__field-label, .slds-form-element__label, .test-id__field-label-container';
+  var FIELD_VALUE = '.test-id__field-value, .slds-form-element__static, .slds-form-element__control, .itemBody';
+  var FEED_ITEM = '.cuf-feedElement, .cuf-feedItem, article.forceChatterFeedItem, [class*="feedElement"], [class*="FeedItem"], [data-feed-item-id], [data-feed-element-id]';
+  var FEED_AUTHOR = '.cuf-entityLink, a.forceChatterEntityLink, [class*="actorName"], [class*="entityLink"], .slds-media__body a[data-recordid], .slds-media__body a';
+  var FEED_TIME = '.cuf-timestamp, [class*="timeStamp"], [class*="timestamp"], lightning-formatted-date-time, lightning-relative-date-time, time';
+  var SKIP_CLASS = /(^|\s)(assistiveText|slds-assistive-text|slds-hide|hidden)(\s|$)/;
+
+  function children(node) {
+    // Shadow content first (if any), then light children (which are slotted into it).
+    var out = [];
+    if (node.shadowRoot) out.push.apply(out, node.shadowRoot.children);
+    if (node.children) out.push.apply(out, node.children);
+    return out;
+  }
+
+  function deepQueryAll(root, selector) {
+    var found = [], stack = [root];
+    while (stack.length) {
+      var n = stack.pop();
+      if (n.nodeType === 1 && n.matches(selector)) found.push(n);
+      var kids = children(n);
+      for (var i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    return found;
+  }
+
+  function deepQuery(root, selector) {
+    var all = deepQueryAll(root, selector);
+    return all.length ? all[0] : null;
+  }
+
+  function isVisible(el) {
+    if (!el.getClientRects || !el.getClientRects().length) return false;
+    var cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none';
+  }
+
+  function composedParent(n) {
+    return n.parentNode && n.parentNode.nodeType === 11 ? n.parentNode.host : n.parentNode;
+  }
+
+  function isInside(el, set) {
+    for (var p = composedParent(el); p; p = composedParent(p)) if (set.has(p)) return true;
+    return false;
+  }
+
+  var BLOCK = /^(block|flex|grid|list-item|table|table-row|flow-root)$/;
+
+  // Visible text of an element, walking shadow roots and slots, with line breaks between blocks.
+  function deepText(root) {
+    var parts = [];
+    (function walk(node) {
+      if (node.nodeType === 3) { parts.push(node.nodeValue); return; }
+      if (node.nodeType !== 1 && node.nodeType !== 11) return;
+      if (node.nodeType === 1) {
+        var tag = node.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE' || tag === 'SVG' || tag === 'svg') return;
+        if (typeof node.className === 'string' && SKIP_CLASS.test(node.className)) return;
+        if (tag === 'BR') { parts.push('\n'); return; }
+        var cs = getComputedStyle(node);
+        if (cs.display === 'none' || cs.visibility === 'hidden') return;
+        var block = BLOCK.test(cs.display) || /^(P|DIV|LI|TR|BUTTON|H[1-6])$/.test(tag);
+        if (block) parts.push('\n');
+        if (tag === 'SLOT') {
+          node.assignedNodes({ flatten: true }).forEach(walk);
+        } else if (node.shadowRoot) {
+          Array.prototype.forEach.call(node.shadowRoot.childNodes, walk);
+        } else {
+          Array.prototype.forEach.call(node.childNodes, walk);
+        }
+        if (block) parts.push('\n');
+        return;
+      }
+      Array.prototype.forEach.call(node.childNodes, walk);  // shadow root
+    })(root);
+    return parts.join('')
+      .replace(/[ \t ]+/g, ' ')
+      .split('\n').map(function (l) { return l.trim(); }).join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function visibleFeedItems() {
+    var items = deepQueryAll(document, FEED_ITEM).filter(isVisible);
+    var set = new Set(items);
+    return items.filter(function (el) { return !isInside(el, set); });  // outermost only
+  }
+
+  // Click "Show more" inside posts and "View more"/"Load more" at the end of the feed.
+  var IN_POST = /^(show|see|view|read) (more|all|full (email|message))$|^more$|^expand( post| email)?$/i;
+  var IN_FEED = /^(show|see|view|load) (more|all)( (posts|updates|feed items|activity|emails))?$/i;
+
+  function clickMatching(scope, regex) {
+    var n = 0;
+    deepQueryAll(scope, 'button, a').forEach(function (b) {
+      var t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t.length < 30 && regex.test(t) && !b.dataset.caseworkClicked && isVisible(b)) {
+        b.dataset.caseworkClicked = '1';
+        b.click();
+        n++;
+      }
+    });
+    return n;
+  }
+
+  async function expandFeed(maxRounds) {
+    for (var round = 0; round < maxRounds; round++) {
+      var items = visibleFeedItems();
+      if (!items.length) return;
+      var clicked = 0;
+      items.forEach(function (it) { clicked += clickMatching(it, IN_POST); });
+      var feed = items[0];  // climb a few levels to reach the feed list's "View more" button
+      for (var i = 0; i < 4 && composedParent(feed) && composedParent(feed).nodeType === 1; i++) feed = composedParent(feed);
+      clicked += clickMatching(feed, IN_FEED);
+      if (!clicked) return;
+      await sleep(1500);
+    }
+  }
+
+  function readFields() {
+    var fields = [], seen = new Set();
+    deepQueryAll(document, FIELD_ITEM).filter(isVisible).forEach(function (item) {
+      var labelEl = deepQuery(item, FIELD_LABEL);
+      var label = labelEl ? deepText(labelEl) : '';
+      var valueEl = deepQuery(item, FIELD_VALUE);
+      var value = valueEl ? deepText(valueEl) : '';
+      label = label.split('\n')[0].trim();
+      if (!label) {
+        var lines = deepText(item).split('\n').filter(Boolean);
+        label = (lines.shift() || '').trim();
+        value = value || lines.join('\n');
+      } else if (valueEl && valueEl.contains(labelEl)) {
+        value = value.slice(value.indexOf(label) + label.length).trim();  // value container also holds the label
+      }
+      if (!label || label.length > 80 || seen.has(label.toLowerCase())) return;
+      seen.add(label.toLowerCase());
+      fields.push({ label: label, value: value.slice(0, 20000) });
+    });
+    return fields;
+  }
+
+  function readFeed() {
+    return visibleFeedItems().map(function (item) {
+      var authorEl = deepQuery(item, FEED_AUTHOR);
+      var timeEl = deepQuery(item, FEED_TIME);
+      var timeTitle = '';
+      if (timeEl) {
+        timeTitle = timeEl.getAttribute('title') || timeEl.getAttribute('datetime') ||
+                    timeEl.getAttribute('value') || '';
+        var a = timeEl.closest && timeEl.closest('a[title]');
+        if (!timeTitle && a) timeTitle = a.getAttribute('title');
+      }
+      return {
+        author: authorEl ? deepText(authorEl).split('\n')[0] : '',
+        timeText: timeEl ? deepText(timeEl) : '',
+        timeTitle: timeTitle,
+        text: deepText(item).slice(0, 100000)
+      };
+    });
+  }
+
+  function caseNumber(fields) {
+    for (var i = 0; i < fields.length; i++) {
+      if (/^case (number|no\.?|#)$/i.test(fields[i].label) && fields[i].value) return fields[i].value.split('\n')[0];
+    }
+    var m = (document.title || '').match(/\b(\d{5,})\b/);
+    if (m) return m[1];
+    var tabs = deepQueryAll(document, '[role="tab"][aria-selected="true"], .tabItem.active, li.slds-is-active');
+    for (var j = 0; j < tabs.length; j++) {
+      var t = deepText(tabs[j]).match(/\b(\d{5,})\b/);
+      if (t) return t[1];
+    }
+    return '';
+  }
+
+  // Structure-only outline (tag + classes, no text) to help fix selectors without sharing case data.
+  function outline(root, depth, maxDepth, out) {
+    if (depth > maxDepth || out.length > 4000) return out;
+    children(root).forEach(function (el) {
+      if (!isVisible(el)) return;
+      var cls = (typeof el.className === 'string' ? el.className : '').trim().split(/\s+/).slice(0, 4).join('.');
+      out.push(new Array(depth + 1).join('  ') + el.tagName.toLowerCase() + (cls ? '.' + cls : '') +
+               (el.shadowRoot ? ' #shadow' : ''));
+      outline(el, depth + 1, maxDepth, out);
+    });
+    return out;
+  }
+
+  window.__caseworkExtract = async function (options) {
+    options = options || {};
+    var warnings = [];
+    if (options.expand !== false) {
+      try { await expandFeed(6); } catch (e) { warnings.push('Could not expand the feed: ' + e.message); }
+    }
+    var fields = readFields();
+    var feed = readFeed();
+    if (!fields.length) warnings.push('No case fields were found on the page.');
+    if (!feed.length) warnings.push('No feed items were found. Open the case feed (All Updates) and try again.');
+    var result = {
+      source: 'salesforce-lightning',
+      version: 1,
+      url: location.href,
+      title: document.title,
+      capturedAt: new Date().toISOString(),
+      userName: options.userName || '',
+      caseNumber: caseNumber(fields),
+      fields: fields,
+      feed: feed,
+      warnings: warnings
+    };
+    if (options.debug) {
+      result.debug = {
+        fieldItemCount: deepQueryAll(document, FIELD_ITEM).length,
+        feedItemCandidates: deepQueryAll(document, FEED_ITEM).length,
+        outline: outline(document.body, 0, 40, [])
+      };
+      result.fields = fields.map(function (f) { return { label: f.label, value: '(' + f.value.length + ' chars)' }; });
+      result.feed = feed.map(function (f) {
+        return { author: f.author ? '(author)' : '', timeText: f.timeText, timeTitle: f.timeTitle,
+                 text: '(' + f.text.length + ' chars)' };
+      });
+    }
+    return result;
+  };
+})();
+```
+
+#### `chrome-extension/popup.html`
+
+The small window that opens when you click the extension icon.
+
+```jinja
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Casework Capture</title><link rel="stylesheet" href="common.css">
+<style>body { width: 320px; padding: 14px; } .small { font-size: 12px; } #debug { margin-top: 10px; }</style></head>
+<body>
+  <h1>Send case to Casework</h1>
+  <p class="hint">Open a case in Salesforce with its feed showing (e.g. <em>All Updates</em>), then click Capture.</p>
+  <label class="check"><input type="checkbox" id="expand" checked> Expand "show more" posts first</label>
+  <div class="row" style="margin-top:10px">
+    <button class="primary" id="capture">Capture this case</button>
+    <a href="#" id="settings" class="small">Settings</a>
+  </div>
+  <div id="status" class="status"></div>
+  <div class="row small" id="debug"><a href="#" id="debugBtn">Download page structure (no case data) for troubleshooting</a></div>
+  <script src="popup.js"></script>
+</body>
+</html>
+```
+
+#### `chrome-extension/popup.js`
+
+Runs the extractor on the current tab, sends the result to Casework, and opens the review page.
+
+```
+'use strict';
+var statusEl = document.getElementById('status');
+
+function show(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.className = 'status ' + (kind || '');
+}
+
+function getSettings() {
+  return chrome.storage.local.get({ serverUrl: '', apiToken: '', userName: '' });
+}
+
+async function runExtractor(options) {
+  var [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !/^https:\/\//.test(tab.url || '')) throw new Error('Open the Salesforce case in this tab first.');
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['extractor.js'] });
+  var [res] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: function (opts) { return window.__caseworkExtract(opts); },
+    args: [options]
+  });
+  if (!res || !res.result) throw new Error('Could not read this page.');
+  return res.result;
+}
+
+document.getElementById('settings').addEventListener('click', function (e) {
+  e.preventDefault();
+  chrome.runtime.openOptionsPage();
+});
+
+document.getElementById('capture').addEventListener('click', async function () {
+  var btn = this;
+  btn.disabled = true;
+  try {
+    var s = await getSettings();
+    if (!s.serverUrl) { show('Set your Casework server address in Settings first.', 'err'); return; }
+    show('Reading the case…');
+    var data = await runExtractor({ userName: s.userName, expand: document.getElementById('expand').checked });
+    show('Found case ' + (data.caseNumber || '(no number)') + ': ' + data.fields.length + ' fields, ' +
+         data.feed.length + ' feed items.\nSending to Casework…');
+    var headers = { 'Content-Type': 'application/json' };
+    if (s.apiToken) headers.Authorization = 'Bearer ' + s.apiToken;
+    var resp = await fetch(s.serverUrl.replace(/\/+$/, '') + '/api/import', {
+      method: 'POST', headers: headers, body: JSON.stringify(data)
+    });
+    var body = await resp.json().catch(function () { return {}; });
+    if (!resp.ok || !body.ok) throw new Error(body.error || ('Server returned ' + resp.status));
+    show('Sent. ' + body.counts.included + ' items suggested, ' + body.counts.ignored + ' ignored. Opening review…', 'ok');
+    chrome.tabs.create({ url: body.reviewUrl });
+  } catch (err) {
+    var msg = err.message || String(err);
+    if (/Failed to fetch/i.test(msg)) {
+      msg = 'Could not reach the Casework server. Check the address in Settings, that the server is running, ' +
+            'and (for HTTPS) that this PC trusts its certificate.';
+    }
+    show(msg, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('debugBtn').addEventListener('click', async function (e) {
+  e.preventDefault();
+  try {
+    var data = await runExtractor({ debug: true, expand: false });
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'casework-page-structure.json'; a.click();
+    show('Saved casework-page-structure.json. It lists page element names and counts, not case text.', 'ok');
+  } catch (err) {
+    show(err.message || String(err), 'err');
+  }
+});
+```
+
+#### `chrome-extension/options.html`
+
+The settings page: server address, API token, your name in Salesforce.
+
+```jinja
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Casework Capture settings</title><link rel="stylesheet" href="common.css">
+<style>body { max-width: 560px; padding: 24px; }</style></head>
+<body>
+  <h1>Casework Capture settings</h1>
+
+  <label for="serverUrl">Casework server address</label>
+  <input type="url" id="serverUrl" placeholder="http://127.0.0.1:5000 or https://casework.mycompany.local:8443">
+  <div class="hint">The address you open Casework at, without anything after the port.</div>
+
+  <label for="apiToken">API token</label>
+  <input type="password" id="apiToken" autocomplete="off">
+  <div class="hint">Must match <code>CASEWORK_API_TOKEN</code> on the server. Leave empty only if the server has no login.</div>
+
+  <label for="userName">Your name as shown in Salesforce</label>
+  <input type="text" id="userName" placeholder="e.g. Sathishkumar Ashok">
+  <div class="hint">Used to tell your messages apart from the customer's. If empty, the Case Owner is used.</div>
+
+  <div class="row" style="margin-top:16px">
+    <button class="primary" id="save">Save</button>
+    <button id="test">Test connection</button>
+  </div>
+  <div id="status" class="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>
+```
+
+#### `chrome-extension/options.js`
+
+Saves the settings and tests the connection to Casework.
+
+```
+'use strict';
+var $ = function (id) { return document.getElementById(id); };
+var statusEl = $('status');
+
+function show(msg, kind) { statusEl.textContent = msg; statusEl.className = 'status ' + (kind || ''); }
+
+chrome.storage.local.get({ serverUrl: '', apiToken: '', userName: '' }).then(function (s) {
+  $('serverUrl').value = s.serverUrl;
+  $('apiToken').value = s.apiToken;
+  $('userName').value = s.userName;
+});
+
+async function save() {
+  var serverUrl = $('serverUrl').value.trim().replace(/\/+$/, '');
+  try { new URL(serverUrl); } catch (e) { show('Enter a full address, e.g. http://127.0.0.1:5000', 'err'); return false; }
+  await chrome.storage.local.set({
+    serverUrl: serverUrl, apiToken: $('apiToken').value.trim(), userName: $('userName').value.trim()
+  });
+  $('serverUrl').value = serverUrl;
+  show('Saved.', 'ok');
+  return true;
+}
+
+$('save').addEventListener('click', save);
+
+$('test').addEventListener('click', async function () {
+  if (!(await save())) return;
+  show('Testing…');
+  try {
+    var headers = {};
+    var token = $('apiToken').value.trim();
+    if (token) headers.Authorization = 'Bearer ' + token;
+    var resp = await fetch($('serverUrl').value + '/api/ping', { headers: headers });
+    var body = await resp.json().catch(function () { return {}; });
+    if (resp.ok && body.ok) show('Connected to Casework.', 'ok');
+    else show(body.error || ('Server returned ' + resp.status), 'err');
+  } catch (e) {
+    show('Could not reach the server. Check the address, that Casework is running, and (for HTTPS) that this PC trusts its certificate.', 'err');
+  }
+});
+```
+
+#### `chrome-extension/background.js`
+
+Opens the settings page when the extension is first installed.
+
+```
+// Opens the settings page the first time the extension is installed.
+chrome.runtime.onInstalled.addListener(function (details) {
+  if (details.reason === 'install') chrome.runtime.openOptionsPage();
+});
+```
+
+#### `chrome-extension/common.css`
+
+Shared styling for the popup and settings page (follows Windows light/dark mode).
+
+```css
+:root { --fg: #1b1f24; --muted: #59636e; --bg: #ffffff; --line: #d1d9e0; --accent: #0b5cad; --ok: #1a7f37; --err: #cf222e; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e6edf3; --muted: #9198a1; --bg: #151b23; --line: #3d444d; --accent: #4493f8; --ok: #3fb950; --err: #f85149; }
+}
+* { box-sizing: border-box; }
+body { font: 14px/1.45 system-ui, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); margin: 0; }
+h1 { font-size: 16px; margin: 0 0 8px; }
+label { display: block; font-weight: 600; margin: 12px 0 4px; }
+input[type=text], input[type=url], input[type=password] { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 3px; }
+button { font: inherit; padding: 7px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button:disabled { opacity: .6; cursor: default; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.status { margin-top: 10px; white-space: pre-wrap; }
+.status.ok { color: var(--ok); } .status.err { color: var(--err); }
+.check { display: flex; gap: 6px; align-items: center; font-weight: 400; }
+a { color: var(--accent); }
+```
+
+**Icons.** Chrome needs three PNG icons. Create them with this one-off command (any
+16x16, 48x48 and 128x128 PNGs named the same way also work):
+
+```powershell
+pip install pillow
+python -c "from PIL import Image, ImageDraw; [ (lambda s: (lambda im: (ImageDraw.Draw(im).rounded_rectangle([0,0,s-1,s-1], radius=max(2,s//6), fill=(11,92,173,255)), im.save(f'chrome-extension/icons/icon{s}.png')))(Image.new('RGBA',(s,s))))(s) for s in (16,48,128)]"
+```
+
+**Tests.** Add the test for the importer and the sample capture it uses:
+
+
+#### `tests/test_import.py`
+
+Checks field mapping, feed sorting, date handling, the API, the review/apply flow and that re-capturing skips items already imported.
+
+```python
+import json
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from casework import create_app
+from casework.importer import build_plan, clean_body, parse_datetime
+from casework.models import Case, Entry, ImportBatch, db
+
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "salesforce_capture.json").read_text())
+
+
+@pytest.fixture
+def app():
+    return create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:"})
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
+def _by_text(plan, needle):
+    return next(i for i in plan["items"] if needle in (i["clean"] or ""))
+
+
+def test_plan_maps_case_fields(app):
+    with app.app_context():
+        case = build_plan(FIXTURE)["case"]
+    assert case["case_number"] == "480570091"
+    assert case["title"].startswith("Unable to sign in")
+    assert case["customer"] == "Acme Corp"
+    assert case["product"] == "Tableau Desktop & Prep Builder-Connecting to Data / Desktop Authentication-Single Sign-On"
+    assert case["version"] == "2024.2.3"
+    assert case["operating_system"] == "Windows 11"
+    assert case["severity"] == "2 - High"
+    assert case["status"] == "In Progress"
+    assert case["opened_on"].isoformat() == "2026-11-02"
+
+
+def test_plan_classifies_feed(app):
+    with app.app_context():
+        plan = build_plan(FIXTURE)
+    assert plan["engineer"] == "Sathishkumar Ashok"  # from Case Owner
+    first = _by_text(plan, "Thank you for contacting Tableau Support")
+    assert first["category"] == "initial_response" and first["include"]
+    assert "Which version of Tableau Desktop" in first["question"]
+    assert "Tableau Desktop 2024.2.3" in first["response"]
+    assert "Best regards" not in first["clean"]
+    reply = _by_text(plan, "Please find the details")
+    assert not reply["include"] and reply["consumed_by"] == first["key"]
+    assert "earlier message" not in reply["clean"] and "Thanks" not in reply["clean"]
+    assert _by_text(plan, "Summary of today's call")["category"] == "meeting"
+    assert _by_text(plan, "AudienceRestriction")["category"] == "troubleshooting"
+    assert _by_text(plan, "any update on this case")["reason"] == "Follow-up / reminder"
+    assert _by_text(plan, "Thank you for sharing the requested details")["reason"].startswith("Acknowledgement")
+    assert _by_text(plan, "System Generated Feed")["reason"].startswith("Automated")
+    assert _by_text(plan, "changed Status from New")["reason"] == "Status or field change"
+    times = [i["when"] for i in plan["items"]]
+    assert times == sorted(times)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("20h ago", datetime(2026, 11, 4, 16, 0)),
+    ("3d ago", datetime(2026, 11, 2, 12, 0)),
+    ("Yesterday at 9:15 AM", datetime(2026, 11, 4, 9, 15)),
+    ("November 3, 2026 at 4:30 PM", datetime(2026, 11, 3, 16, 30)),
+    ("11/3/2026, 4:30 PM", datetime(2026, 11, 3, 16, 30)),
+    ("2/11/2026, 9:30 AM", datetime(2026, 2, 11, 9, 30)),  # month/day unless told otherwise
+    ("25/10/2026 09:30", datetime(2026, 10, 25, 9, 30)),  # only valid as day/month
+    ("2026-11-03T10:00", datetime(2026, 11, 3, 10, 0)),
+    ("not a date", None),
+])
+def test_parse_datetime(text, expected):
+    assert parse_datetime(text, datetime(2026, 11, 5, 12, 0)) == expected
+
+
+def test_day_first_detection():
+    now = datetime(2026, 11, 5, 12, 0)
+    from casework.importer import detect_day_first
+    assert detect_day_first({"fields": [{"label": "Opened", "value": "25/10/2026 09:30"}]}, now) is True
+    assert detect_day_first({"fields": [{"label": "Opened", "value": "10/25/2026 9:30 AM"}]}, now) is False
+    # ambiguous dates, settled by comparing with the "3d ago" labels
+    feed = [{"timeText": "3d ago", "timeTitle": "2/11/2026 12:00"}, {"timeText": "1d ago", "timeTitle": "4/11/2026 12:00"}]
+    assert detect_day_first({"feed": feed}, now) is True
+    plan_day_first = {"fields": [{"label": "Date/Time Opened", "value": "2/11/2026 09:30"}], "feed": feed,
+                      "capturedAt": "2026-11-05T12:00:00"}
+    assert build_plan(plan_day_first)["case"]["opened_on"].isoformat() == "2026-11-02"
+
+
+def test_clean_body_strips_greeting_signature_and_quotes():
+    body = "Hi Alex,\n\nThe fix is to update the audience URI.\n\nRegards,\nSathish\n\nOn Mon wrote:\n> old"
+    assert clean_body(body) == "The fix is to update the audience URI."
+
+
+def test_api_import_review_and_apply(client, app):
+    r = client.post("/api/import", json=FIXTURE)
+    assert r.status_code == 200 and r.json["ok"]
+    assert r.json["counts"]["included"] == 4
+    review = r.json["reviewUrl"].replace("http://localhost", "")
+    page = client.get(review).get_data(as_text=True)
+    assert "Review import" in page and "Follow-up / reminder" in page
+
+    with app.app_context():
+        from casework.importer import build_plan as bp
+        plan = bp(FIXTURE)
+    form = {f"include_{i['key']}": "1" for i in plan["items"] if i["include"]}
+    form.update({f"cat_{i['key']}": i["category"] for i in plan["items"]})
+    for name, value in [("case_number", "480570091"), ("title", plan["case"]["title"]), ("product", plan["case"]["product"]),
+                        ("version", "2024.2.3"), ("operating_system", "Windows 11"), ("status", "In Progress"),
+                        ("severity", "2 - High"), ("opened_on", "2026-11-02"), ("customer", "Acme Corp")]:
+        form[f"apply_{name}"] = "1"
+        form[f"value_{name}"] = value
+    r = client.post(review, data=form)
+    assert r.status_code == 302
+
+    with app.app_context():
+        case = Case.query.filter_by(case_number="480570091").one()
+        assert case.opened_on.isoformat() == "2026-11-02" and case.version == "2024.2.3"
+        types = sorted(e.entry_type for e in case.entries)
+        assert types == ["initial_response", "meeting", "note", "scoping", "troubleshooting"]
+        scoping = case.entries_of("scoping")[0]
+        assert "Which version" in scoping.question and "2024.2.3" in scoping.response
+        assert db.session.query(ImportBatch).one().applied_at is not None
+        imported_keys = {i.key for i in case.imported_items}
+        assert len(imported_keys) == 5  # 4 items + the reply used as the scoping answer
+
+    # Capturing the same case again: everything already imported is skipped.
+    r = client.post("/api/import", json=FIXTURE)
+    assert r.json["counts"]["included"] == 4  # counts are computed before the case lookup
+    page = client.get(r.json["reviewUrl"].replace("http://localhost", "")).get_data(as_text=True)
+    assert "Already imported earlier" in page and "Updating existing case" in page
+    r = client.post(r.json["reviewUrl"].replace("http://localhost", ""), data={})
+    with app.app_context():
+        assert Entry.query.count() == 5
+
+
+def test_api_rejects_empty(client):
+    assert client.post("/api/import", json={}).status_code == 400
+
+
+def test_api_token_required_when_login_enabled():
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+                      "CASEWORK_USERNAME": "me", "CASEWORK_PASSWORD": "pw"})
+    c = app.test_client()
+    assert c.get("/api/ping").status_code == 401  # login on, no token configured
+    app.config["CASEWORK_API_TOKEN"] = "t0ken"
+    assert c.get("/api/ping").status_code == 401
+    assert c.get("/api/ping", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/api/ping", headers={"Authorization": "Bearer t0ken"}).json["ok"]
+    # the review page still requires the normal login
+    assert c.get("/import/abc").status_code == 401
+```
+
+`tests\fixtures\salesforce_capture.json` is a sample capture (what the extension produces).
+Copy it from the repository, since it's data rather than code. Then run all tests again.
+
+**Try it:** load the extension in Chrome and capture a case, following
+[CHROME_EXTENSION.md](CHROME_EXTENSION.md) from step 2.
+
+## 15. Save your work with Git
 
 1. Open **Source Control** (**Ctrl+Shift+G**).
 2. Check the list of changed files. `.venv`, `instance`, `certs` and `backups` should **not**
@@ -2727,7 +4380,7 @@ It creates `backups\casework-<date-time>.db`.
 4. To put it on GitHub: click **Publish Branch** (or **Publish to GitHub**) and follow the
    sign-in prompts. You can then `git clone` it onto your Windows Server.
 
-## 15. Next steps
+## 16. Next steps
 
 - **Deploy it:** follow [DEPLOY_WINDOWS.md](DEPLOY_WINDOWS.md) to run it as a service on
   Windows Server with HTTPS.
@@ -2741,7 +4394,7 @@ It creates `backups\casework-<date-time>.db`.
 - **Look inside the database:** install a SQLite viewer extension (search "SQLite" in
   Extensions) and open `instance\casework.db`.
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | Problem | Fix |
 |---|---|

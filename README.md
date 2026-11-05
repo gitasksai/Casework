@@ -46,6 +46,13 @@ python run.py                      # http://127.0.0.1:5000
 
 Data is stored in SQLite at `instance/casework.db`.
 
+## Capturing cases from Salesforce
+
+The **Chrome extension** in `chrome-extension/` reads the Salesforce case you have open and sends
+it to Casework. Casework sorts the case feed into the tabs, ignores follow-ups, acknowledgements
+and automated posts, and shows a review screen before anything is saved. See
+**[docs/CHROME_EXTENSION.md](docs/CHROME_EXTENSION.md)**.
+
 ## Building it yourself
 
 [docs/BUILD_FROM_SCRATCH_VSCODE.md](docs/BUILD_FROM_SCRATCH_VSCODE.md) walks through creating
@@ -67,6 +74,7 @@ certificate helper (`python tls_cert.py`), firewall, and daily backups (`python 
 | `CASEWORK_DATABASE_URL` | `sqlite:///instance/casework.db` | SQLAlchemy database URL |
 | `CASEWORK_SECRET_KEY` | `dev-change-me` | Flask session secret (set this if you host it) |
 | `CASEWORK_USERNAME` / `CASEWORK_PASSWORD` | *(unset)* | When both are set, every page requires this login |
+| `CASEWORK_API_TOKEN` | *(unset)* | Token the Chrome extension sends; required when a login is set |
 | `CASEWORK_SSL_CERT` / `CASEWORK_SSL_KEY` | *(unset)* | PEM certificate and key; when set, `serve.py` serves HTTPS |
 | `CASEWORK_HOST` / `CASEWORK_PORT` | `0.0.0.0` / `8443` (HTTPS) or `8080` | Where `serve.py` listens |
 

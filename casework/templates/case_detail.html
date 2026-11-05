@@ -282,6 +282,7 @@
       if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
     }
     show(location.hash);
+    window.addEventListener('hashchange', function () { show(location.hash); });
     document.querySelectorAll('#caseTabs [data-bs-toggle="tab"]').forEach(function (btn) {
       btn.addEventListener('shown.bs.tab', function (ev) {
         history.replaceState(null, '', ev.target.getAttribute('data-bs-target'));

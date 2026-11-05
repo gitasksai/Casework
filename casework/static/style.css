@@ -16,3 +16,5 @@
   nav.navbar, .btn, .alert, details { display: none !important; }
   .report-text { border: 0; height: auto !important; overflow: visible; }
 }
+
+.import-text { max-height: 14rem; overflow: auto; background: var(--bs-tertiary-bg); padding: .5rem; border-radius: .25rem; }

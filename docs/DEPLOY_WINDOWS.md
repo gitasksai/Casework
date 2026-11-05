@@ -120,6 +120,7 @@ Generate a secret key (copy the output):
 | `CASEWORK_SSL_KEY` | `C:\Casework\certs\key.pem` | |
 | `CASEWORK_USERNAME` | `casework` | Turns on the login prompt. **Strongly recommended.** |
 | `CASEWORK_PASSWORD` | *(a strong password)* | Used with the username above. |
+| `CASEWORK_API_TOKEN` | *(another random value)* | Needed for the Chrome extension ([CHROME_EXTENSION.md](CHROME_EXTENSION.md)). Generate it like the secret key. |
 | `CASEWORK_PORT` | `8443` | Default is 8443 with HTTPS. Use `443` so users don't have to type a port, as long as nothing else on the server uses 443. |
 | `CASEWORK_HOST` | `0.0.0.0` | `0.0.0.0` = reachable from the network; `127.0.0.1` = this server only. |
 | `CASEWORK_DATABASE_URL` | `sqlite:///C:/Casework/instance/casework.db` | Optional. This is the default; note the forward slashes. |
@@ -158,7 +159,7 @@ to stop it.
    nssm set Casework DisplayName "Casework"
    nssm set Casework Description "Casework case management web app"
    nssm set Casework Start SERVICE_AUTO_START
-   nssm set Casework AppEnvironmentExtra "CASEWORK_SECRET_KEY=paste-secret-here" "CASEWORK_SSL_CERT=C:\Casework\certs\cert.pem" "CASEWORK_SSL_KEY=C:\Casework\certs\key.pem" "CASEWORK_USERNAME=casework" "CASEWORK_PASSWORD=choose-a-password" "CASEWORK_PORT=8443"
+   nssm set Casework AppEnvironmentExtra "CASEWORK_SECRET_KEY=paste-secret-here" "CASEWORK_SSL_CERT=C:\Casework\certs\cert.pem" "CASEWORK_SSL_KEY=C:\Casework\certs\key.pem" "CASEWORK_USERNAME=casework" "CASEWORK_PASSWORD=choose-a-password" "CASEWORK_API_TOKEN=paste-token-here" "CASEWORK_PORT=8443"
    nssm set Casework AppStdout "C:\Casework\logs\casework.log"
    nssm set Casework AppStderr "C:\Casework\logs\casework.log"
    nssm set Casework AppRotateFiles 1
@@ -192,6 +193,7 @@ window), `nssm remove Casework confirm`.
    set CASEWORK_SSL_KEY=C:\Casework\certs\key.pem
    set CASEWORK_USERNAME=casework
    set CASEWORK_PASSWORD=choose-a-password
+   set CASEWORK_API_TOKEN=paste-token-here
    set CASEWORK_PORT=8443
    C:\Casework\.venv\Scripts\python.exe serve.py >> C:\Casework\logs\casework.log 2>&1
    ```

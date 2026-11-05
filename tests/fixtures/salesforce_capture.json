@@ -1,0 +1,116 @@
+{
+  "source": "salesforce-lightning",
+  "version": 1,
+  "url": "file:///tmp/claude-0/-home-user-Casework/a8d22902-e3fa-566f-afcb-1e08bb895703/scratchpad/ext/mock_case.html",
+  "title": "480570091 | Case | Salesforce",
+  "capturedAt": "2026-11-05T18:39:21.697Z",
+  "userName": "",
+  "caseNumber": "480570091",
+  "fields": [
+    {
+      "label": "Case Number",
+      "value": "480570091"
+    },
+    {
+      "label": "Subject",
+      "value": "Unable to sign in to Tableau Server from Desktop using SSO"
+    },
+    {
+      "label": "Status",
+      "value": "Working"
+    },
+    {
+      "label": "Sub-Status",
+      "value": "In Progress"
+    },
+    {
+      "label": "Severity",
+      "value": "Severity 2"
+    },
+    {
+      "label": "Case Owner",
+      "value": "Sathishkumar Ashok"
+    },
+    {
+      "label": "Product & Topic",
+      "value": "Tableau Desktop & Prep Builder-Connecting to Data"
+    },
+    {
+      "label": "Product Feature",
+      "value": "Desktop Authentication-Single Sign-On"
+    },
+    {
+      "label": "Account Name",
+      "value": "Acme Corp"
+    },
+    {
+      "label": "Date/Time Opened",
+      "value": "11/2/2026, 9:30 AM"
+    },
+    {
+      "label": "Description",
+      "value": "Users get 'Unable to sign in' when connecting from Tableau Desktop 2024.2.3 on Windows 11 to Tableau Server with Okta SAML SSO. Started after the IdP certificate was rotated."
+    },
+    {
+      "label": "Contact Phone",
+      "value": ""
+    }
+  ],
+  "feed": [
+    {
+      "author": "Sathishkumar Ashok",
+      "timeText": "20h ago",
+      "timeTitle": "November 4, 2026 at 2:15 PM",
+      "text": "Sathishkumar Ashok\nTo: All\n20h ago\n\nHi Alex,\n\nThank you for sharing the requested details. I will check the given details and update you with our findings.\n\nBest regards,\nSathish\nTechnical Support |Tableau | Salesforce.\nWebsite:help.salesforce.com\n\nComment\n\nLike"
+    },
+    {
+      "author": "Salesforce Support Automation",
+      "timeText": "21h ago",
+      "timeTitle": "November 4, 2026 at 1:10 PM",
+      "text": "Salesforce Support Automation\nTo: Internal\n21h ago\n\nSystem Generated Feed : these contain file with thumbnails.\n\nComment\n\nLike"
+    },
+    {
+      "author": "Alex Morgan",
+      "timeText": "1d ago",
+      "timeTitle": "November 4, 2026 at 9:00 AM",
+      "text": "Alex Morgan\nTo: All\n1d ago\n\nHi, any update on this case? Thanks\n\nComment\n\nLike"
+    },
+    {
+      "author": "Sathishkumar Ashok",
+      "timeText": "1d ago",
+      "timeTitle": "November 4, 2026 at 11:40 AM",
+      "text": "Sathishkumar Ashok\nTo: Internal\n1d ago\n\nReviewed the logs from the customer (tabprotosrv.txt and the HAR file). Found SAML error: AudienceRestriction mismatch - the SP entity ID in Okta does not match Tableau Server after the certificate rotation. Tested in lab with Okta dev tenant and reproduced the same error by changing the audience URI.\n\nComment\n\nLike"
+    },
+    {
+      "author": "Sathishkumar Ashok",
+      "timeText": "2d ago",
+      "timeTitle": "November 3, 2026 at 4:30 PM",
+      "text": "Sathishkumar Ashok\nTo: All\n2d ago\n\nSummary of today's call with Alex: we did a remote session and reviewed the Okta app configuration together. Attendees: Alex Morgan (Acme IT), Sathish. Customer will share the IdP metadata XML and the Tableau Server SAML settings screenshot.\n\nComment\n\nLike"
+    },
+    {
+      "author": "Alex Morgan",
+      "timeText": "2d ago",
+      "timeTitle": "November 3, 2026 at 10:05 AM",
+      "text": "Alex Morgan\nTo: All\n2d ago\n\nFrom: Alex Morgan <alex.morgan@acme.com>\nTo: support@tableau.com\nSubject: RE: Case 480570091 - Unable to sign in with SSO\nHi Sathish,\n\nPlease find the details:\n1. Tableau Desktop 2024.2.3\n2. Windows 11 Enterprise 23H2\n3. All users are affected since Monday, when we rotated the Okta signing certificate.\nThe error is \"Unable to sign in. Please contact your administrator\".\n\nThanks,\nAlex\n\nOn Mon, Nov 2, 2026 at 10:00 AM Tableau Support wrote:\n> earlier message\n\nComment\n\nLike"
+    },
+    {
+      "author": "Sathishkumar Ashok",
+      "timeText": "3d ago",
+      "timeTitle": "November 2, 2026 at 10:00 AM",
+      "text": "Sathishkumar Ashok\nTo: All\n3d ago\n\nFrom: Sathishkumar Ashok\nTo: alex.morgan@acme.com\nSubject: Case 480570091 - Unable to sign in with SSO\nHi Alex,\n\nThank you for contacting Tableau Support. My name is Sathish and I will be working with you on this case.\n\nTo help me investigate, could you please confirm:\n1. Which version of Tableau Desktop are you using?\n2. Which operating system is installed on the affected machines?\n3. Does this happen for all users or only some?\n\nBest regards,\nSathish\n\nComment\n\nLike"
+    },
+    {
+      "author": "Sathishkumar Ashok",
+      "timeText": "3d ago",
+      "timeTitle": "November 2, 2026 at 9:31 AM",
+      "text": "Sathishkumar Ashok\nTo: Internal\n3d ago\n\nSathishkumar Ashok changed Status from New to Working.\n\nComment\n\nLike"
+    },
+    {
+      "author": "Alex Morgan",
+      "timeText": "4d ago",
+      "timeTitle": "November 1, 2026 at 5:00 PM",
+      "text": "Alex Morgan\nTo: All\n4d ago\n\nOlder post loaded by View More: we see the issue on Tableau Desktop for all users after the Okta change.\n\nComment\n\nLike"
+    }
+  ],
+  "warnings": []
+}

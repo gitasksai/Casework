@@ -48,6 +48,7 @@ class Case(db.Model):
         order_by="Entry.occurred_at",
         lazy="select",
     )
+    imported_items = db.relationship("ImportedItem", cascade="all, delete-orphan", lazy="select")
 
     @property
     def is_closed(self):
@@ -114,3 +115,25 @@ class Entry(db.Model):
         text = self.title or self.question or self.body or ""
         first = text.strip().splitlines()[0] if text.strip() else ""
         return first if len(first) <= 120 else first[:117] + "..."
+
+
+class ImportBatch(db.Model):
+    """A case captured by the Chrome extension, waiting for review."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    token = db.Column(db.String(32), unique=True, nullable=False, index=True)
+    case_number = db.Column(db.String(64))
+    payload = db.Column(db.Text, nullable=False)  # JSON from the extension
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    applied_at = db.Column(db.DateTime)
+    case_id = db.Column(db.Integer, db.ForeignKey("case.id", ondelete="SET NULL"))
+
+
+class ImportedItem(db.Model):
+    """Remembers which Salesforce feed items were already imported into a case."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey("case.id"), nullable=False, index=True)
+    key = db.Column(db.String(40), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    __table_args__ = (db.UniqueConstraint("case_id", "key"),)

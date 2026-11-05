@@ -49,8 +49,8 @@ Data is stored in SQLite at `instance/casework.db`.
 ## Deploying on Windows Server
 
 See **[docs/DEPLOY_WINDOWS.md](docs/DEPLOY_WINDOWS.md)** for running it as a Windows service
-with Waitress (`python serve.py`), a login, firewall, HTTPS via IIS, and daily backups
-(`python backup.py`).
+with HTTPS served directly by Python (`python serve.py`, no IIS needed), a login, a
+certificate helper (`python tls_cert.py`), firewall, and daily backups (`python backup.py`).
 
 ## Configuration (environment variables)
 
@@ -61,7 +61,8 @@ with Waitress (`python serve.py`), a login, firewall, HTTPS via IIS, and daily b
 | `CASEWORK_DATABASE_URL` | `sqlite:///instance/casework.db` | SQLAlchemy database URL |
 | `CASEWORK_SECRET_KEY` | `dev-change-me` | Flask session secret (set this if you host it) |
 | `CASEWORK_USERNAME` / `CASEWORK_PASSWORD` | *(unset)* | When both are set, every page requires this login |
-| `CASEWORK_HOST` / `CASEWORK_PORT` | `0.0.0.0` / `8080` | Where `serve.py` listens |
+| `CASEWORK_SSL_CERT` / `CASEWORK_SSL_KEY` | *(unset)* | PEM certificate and key; when set, `serve.py` serves HTTPS |
+| `CASEWORK_HOST` / `CASEWORK_PORT` | `0.0.0.0` / `8443` (HTTPS) or `8080` | Where `serve.py` listens |
 
 ## Tests
 
@@ -72,6 +73,6 @@ pytest
 ## Note
 
 Without `CASEWORK_USERNAME`/`CASEWORK_PASSWORD` there is no login, so set them before
-exposing it on a network. The login is HTTP Basic auth: use HTTPS (see the Windows guide)
-unless the network is trusted. Bootstrap is bundled in `casework/static/vendor`, so no
+exposing it on a network. The login is HTTP Basic auth, so also set
+`CASEWORK_SSL_CERT`/`CASEWORK_SSL_KEY` to encrypt the connection. Bootstrap is bundled in `casework/static/vendor`, so no
 internet access is needed.

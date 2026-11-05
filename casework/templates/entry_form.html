@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% from "_macros.html" import entry_fields with context %}
+{% block title %}Edit {{ spec.singular }}{% endblock %}
+{% block content %}
+<h1 class="h4 mb-3">Edit {{ spec.singular }} · <a href="{{ url_for('main.case_detail', case_id=case.id) }}">{{ case.case_number }}</a></h1>
+<form method="post" class="card">
+  <div class="card-body">{{ entry_fields(spec, entry) }}</div>
+  <div class="card-footer d-flex gap-2">
+    <button class="btn btn-primary"><i class="bi bi-check-lg"></i> Save</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('main.case_detail', case_id=case.id) }}#tab-{{ entry.entry_type.replace('_', '-') }}">Cancel</a>
+  </div>
+</form>
+{% endblock %}

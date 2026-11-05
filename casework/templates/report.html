@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · {{ case.case_number }}{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <h1 class="h4 mb-0">{{ title }} · <a href="{{ url_for('main.case_detail', case_id=case.id) }}">{{ case.case_number }}</a></h1>
+  <div class="ms-auto d-flex gap-2">
+    <button class="btn btn-primary" id="copyBtn"><i class="bi bi-clipboard"></i> Copy</button>
+    <a class="btn btn-outline-primary" href="{{ url_for('main.report', case_id=case.id, kind=kind, download=1) }}"><i class="bi bi-download"></i> Download .md</a>
+    <button class="btn btn-outline-secondary" onclick="window.print()"><i class="bi bi-printer"></i> Print</button>
+  </div>
+</div>
+
+{% if not due %}
+  <div class="alert alert-info">This case is {{ case.age_days }} day(s) old, so the {{ title|lower }} isn't due yet
+    ({{ SWARM_DAYS if kind == 'swarm' else SI_DAYS }} days). You can still generate it early.</div>
+{% endif %}
+{% if gaps %}
+  <details class="alert alert-warning">
+    <summary><strong>{{ gaps|length }} gap(s)</strong> a reviewer is likely to ask about — fill these in for a stronger request.</summary>
+    <ul class="mb-0 mt-2">{% for g in gaps %}<li>{{ g }}</li>{% endfor %}</ul>
+  </details>
+{% endif %}
+
+<textarea id="report" class="form-control font-monospace report-text" rows="40" readonly>{{ markdown }}</textarea>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.getElementById('copyBtn').addEventListener('click', function () {
+    var ta = document.getElementById('report'), btn = this;
+    var done = function () { btn.innerHTML = '<i class="bi bi-check-lg"></i> Copied'; setTimeout(function () { btn.innerHTML = '<i class="bi bi-clipboard"></i> Copy'; }, 1500); };
+    if (navigator.clipboard) { navigator.clipboard.writeText(ta.value).then(done); }
+    else { ta.select(); document.execCommand('copy'); done(); }
+  });
+</script>
+{% endblock %}

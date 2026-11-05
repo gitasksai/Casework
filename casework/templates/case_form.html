@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}{{ 'New case' if is_new else 'Edit ' ~ case.case_number }}{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">{{ 'New case' if is_new else 'Edit case ' ~ case.case_number }}</h1>
+<form method="post" class="card"><div class="card-body">
+  <h2 class="h6 text-uppercase text-body-secondary">Case details</h2>
+  <div class="row g-3 mb-4">
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="case_number">Case number <span class="text-danger">*</span></label>
+      <input class="form-control" id="case_number" name="case_number" value="{{ case.case_number or '' }}" required>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label fw-semibold" for="title">Title / short description <span class="text-danger">*</span></label>
+      <input class="form-control" id="title" name="title" value="{{ case.title or '' }}" required>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="customer">Customer</label>
+      <input class="form-control" id="customer" name="customer" value="{{ case.customer or '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label fw-semibold" for="product">Product <span class="text-danger">*</span></label>
+      <input class="form-control" id="product" name="product" value="{{ case.product or '' }}" required>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label fw-semibold" for="version">Version</label>
+      <input class="form-control" id="version" name="version" value="{{ case.version or '' }}">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="operating_system">Operating system</label>
+      <input class="form-control" id="operating_system" name="operating_system" value="{{ case.operating_system or '' }}"
+             placeholder="e.g. Windows Server 2022, RHEL 9.4">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="severity">Severity</label>
+      <select class="form-select" id="severity" name="severity">
+        <option value="">-</option>
+        {% for s in severities %}<option {% if case.severity == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="status">Status</label>
+      <select class="form-select" id="status" name="status">
+        {% for s in statuses %}<option {% if case.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="opened_on">Opened on <span class="text-danger">*</span></label>
+      <input class="form-control" type="date" id="opened_on" name="opened_on" value="{{ case.opened_on or '' }}" required>
+      <div class="form-text">Case age is counted from this date.</div>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label fw-semibold" for="closed_on">Closed on</label>
+      <input class="form-control" type="date" id="closed_on" name="closed_on" value="{{ case.closed_on or '' }}">
+    </div>
+  </div>
+
+  <h2 class="h6 text-uppercase text-body-secondary">Narrative <span class="text-lowercase fw-normal">(feeds the swarm / structured investigation reports)</span></h2>
+  <div class="row g-3">
+    {% for name, label, hint in [
+      ('problem_description', 'Problem description', 'What is broken, symptoms, error messages'),
+      ('business_impact', 'Business impact', 'Who / what is affected and how badly'),
+      ('current_status', 'Current status', 'Where the case stands right now'),
+      ('next_steps', 'Next steps', 'What you plan to do next'),
+      ('help_needed', 'Help needed / ask', 'What you want from a swarm or investigation team'),
+    ] %}
+    <div class="col-md-6">
+      <label class="form-label fw-semibold" for="{{ name }}">{{ label }}</label>
+      <textarea class="form-control" id="{{ name }}" name="{{ name }}" rows="4" placeholder="{{ hint }}">{{ case[name] or '' }}</textarea>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+<div class="card-footer d-flex gap-2">
+  <button class="btn btn-primary"><i class="bi bi-check-lg"></i> Save</button>
+  <a class="btn btn-outline-secondary" href="{{ url_for('main.dashboard') if is_new else url_for('main.case_detail', case_id=case.id) }}">Cancel</a>
+</div>
+</form>
+{% endblock %}

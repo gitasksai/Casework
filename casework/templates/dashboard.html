@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% from "_macros.html" import age_badge %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="row g-3 mb-4">
+  <div class="col-sm-4">
+    <div class="card stat-card border-success"><div class="card-body">
+      <div class="text-body-secondary small">Open cases</div><div class="fs-2 fw-bold">{{ stats.open }}</div>
+    </div></div>
+  </div>
+  <div class="col-sm-4">
+    <div class="card stat-card border-warning"><div class="card-body">
+      <div class="text-body-secondary small">Swarm due ({{ SWARM_DAYS }}+ days)</div><div class="fs-2 fw-bold">{{ stats.swarm }}</div>
+    </div></div>
+  </div>
+  <div class="col-sm-4">
+    <div class="card stat-card border-danger"><div class="card-body">
+      <div class="text-body-secondary small">Structured investigation due ({{ SI_DAYS }}+ days)</div><div class="fs-2 fw-bold">{{ stats.si }}</div>
+    </div></div>
+  </div>
+</div>
+
+<form class="row g-2 mb-3" method="get">
+  <div class="col-md-6">
+    <input class="form-control" name="q" value="{{ q }}" placeholder="Search case #, title, customer, product, version, OS">
+  </div>
+  <div class="col-md-3">
+    <select class="form-select" name="status" onchange="this.form.submit()">
+      <option value="open" {% if status == 'open' %}selected{% endif %}>All open</option>
+      <option value="all" {% if status == 'all' %}selected{% endif %}>All cases</option>
+      <option value="closed" {% if status == 'closed' %}selected{% endif %}>Resolved / closed</option>
+      {% for s in statuses %}<option {% if status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="col-md-3 d-flex gap-2">
+    <button class="btn btn-outline-primary"><i class="bi bi-search"></i> Search</button>
+    <a class="btn btn-primary ms-auto" href="{{ url_for('main.case_new') }}"><i class="bi bi-plus-lg"></i> New case</a>
+  </div>
+</form>
+
+{% if cases %}
+<div class="table-responsive">
+<table class="table table-hover align-middle">
+  <thead class="table-light">
+    <tr><th>Case #</th><th>Title</th><th>Product</th><th>Version</th><th>OS</th><th>Severity</th><th>Status</th><th>Opened</th><th>Age</th><th>Logged</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for c in cases %}
+    <tr>
+      <td><a class="fw-semibold" href="{{ url_for('main.case_detail', case_id=c.id) }}">{{ c.case_number }}</a></td>
+      <td>{{ c.title }}{% if c.customer %}<div class="small text-body-secondary">{{ c.customer }}</div>{% endif %}</td>
+      <td>{{ c.product }}</td>
+      <td>{{ c.version or '' }}</td>
+      <td>{{ c.operating_system or '' }}</td>
+      <td>{{ c.severity or '' }}</td>
+      <td>{{ c.status }}</td>
+      <td class="text-nowrap">{{ c.opened_on }}</td>
+      <td>{{ age_badge(c) }}</td>
+      <td class="small text-body-secondary text-nowrap">
+        {{ c.entries_of('troubleshooting')|length }} TS · {{ c.entries_of('meeting')|length }} mtg
+      </td>
+      <td class="text-nowrap">
+        {% if not c.is_closed and c.escalation_stage == 'structured_investigation' %}
+          <a class="btn btn-sm btn-danger" href="{{ url_for('main.report', case_id=c.id, kind='structured_investigation') }}">SI report</a>
+        {% elif not c.is_closed and c.escalation_stage == 'swarm' %}
+          <a class="btn btn-sm btn-warning" href="{{ url_for('main.report', case_id=c.id, kind='swarm') }}">Swarm report</a>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<div class="text-center text-body-secondary py-5">
+  <i class="bi bi-inbox fs-1"></i>
+  <p class="mt-2">No cases found. <a href="{{ url_for('main.case_new') }}">Create your first case</a>.</p>
+</div>
+{% endif %}
+{% endblock %}

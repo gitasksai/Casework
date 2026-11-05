@@ -1,0 +1,43 @@
+{% macro age_badge(case) -%}
+  {%- if case.is_closed -%}
+    <span class="badge text-bg-secondary">{{ case.age_days }}d</span>
+  {%- elif case.escalation_stage == 'structured_investigation' -%}
+    <span class="badge text-bg-danger" title="Structured investigation due">{{ case.age_days }}d · SI</span>
+  {%- elif case.escalation_stage == 'swarm' -%}
+    <span class="badge text-bg-warning" title="Swarm due">{{ case.age_days }}d · Swarm</span>
+  {%- else -%}
+    <span class="badge text-bg-success">{{ case.age_days }}d</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro entry_fields(spec, entry=None, prefix='') -%}
+  {% for name, label, widget, required, placeholder in spec.fields %}
+    {% set fid = prefix ~ name %}
+    {% set value = entry[name] if entry else None %}
+    <div class="mb-3 {% if widget in ('datetime', 'number') %}d-inline-block me-3{% endif %}">
+      <label class="form-label fw-semibold" for="{{ fid }}">{{ label }}{% if required %} <span class="text-danger">*</span>{% endif %}</label>
+      {% if widget == 'textarea' %}
+        <textarea class="form-control" id="{{ fid }}" name="{{ name }}" rows="4"
+                  placeholder="{{ placeholder }}" {% if required %}required{% endif %}>{{ value or '' }}</textarea>
+      {% elif widget == 'datetime' %}
+        <input class="form-control" type="datetime-local" id="{{ fid }}" name="{{ name }}"
+               value="{{ (value or now) | dt('%Y-%m-%dT%H:%M') }}" {% if required %}required{% endif %}>
+      {% elif widget == 'number' %}
+        <input class="form-control" type="number" min="0" id="{{ fid }}" name="{{ name }}"
+               value="{{ value if value is not none else '' }}" placeholder="{{ placeholder }}">
+      {% else %}
+        <input class="form-control" type="text" id="{{ fid }}" name="{{ name }}"
+               value="{{ value or '' }}" placeholder="{{ placeholder }}" {% if required %}required{% endif %}>
+      {% endif %}
+    </div>
+  {% endfor %}
+{%- endmacro %}
+
+{% macro text_block(label, value) -%}
+  {% if value %}
+    <div class="mb-2">
+      <div class="small text-uppercase text-body-secondary fw-semibold">{{ label }}</div>
+      <div class="prewrap">{{ value }}</div>
+    </div>
+  {% endif %}
+{%- endmacro %}

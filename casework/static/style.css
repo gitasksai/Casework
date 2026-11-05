@@ -1,0 +1,18 @@
+.prewrap { white-space: pre-wrap; }
+.stat-card { border-left-width: 4px !important; }
+.add-form > summary { cursor: pointer; list-style: none; }
+.add-form > summary::-webkit-details-marker { display: none; }
+.add-form:not([open]) > summary { border-bottom: 0; }
+.report-text { font-size: .85rem; min-height: 60vh; }
+.nav-tabs .nav-link { white-space: nowrap; }
+
+.badge.type-initial_response { background: #0d6efd; }
+.badge.type-scoping { background: #6f42c1; }
+.badge.type-troubleshooting { background: #fd7e14; }
+.badge.type-meeting { background: #198754; }
+.badge.type-note { background: #6c757d; }
+
+@media print {
+  nav.navbar, .btn, .alert, details { display: none !important; }
+  .report-text { border: 0; height: auto !important; overflow: visible; }
+}

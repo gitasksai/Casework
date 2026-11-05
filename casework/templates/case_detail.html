@@ -1,0 +1,292 @@
+{% extends "base.html" %}
+{% from "_macros.html" import age_badge, entry_fields, text_block with context %}
+{% block title %}{{ case.case_number }}{% endblock %}
+
+{% macro entry_actions(e) %}
+  <div class="btn-group btn-group-sm">
+    <a class="btn btn-outline-secondary" href="{{ url_for('main.entry_edit', entry_id=e.id) }}" title="Edit"><i class="bi bi-pencil"></i></a>
+    <form method="post" action="{{ url_for('main.entry_delete', entry_id=e.id) }}" onsubmit="return confirm('Delete this entry?')">
+      <button class="btn btn-outline-danger btn-sm rounded-start-0" title="Delete"><i class="bi bi-trash"></i></button>
+    </form>
+  </div>
+{% endmacro %}
+
+{% macro add_form(type_key, open=False) %}
+  {% set spec = ENTRY_TYPES[type_key] %}
+  <details class="card mb-3 add-form" {% if open %}open{% endif %}>
+    <summary class="card-header fw-semibold"><i class="bi bi-plus-circle"></i> Add {{ spec.singular }}</summary>
+    <form class="card-body" method="post" action="{{ url_for('main.entry_add', case_id=case.id, entry_type=type_key) }}">
+      {{ entry_fields(spec, prefix=type_key ~ '-') }}
+      <div><button class="btn btn-primary"><i class="bi bi-plus-lg"></i> Add</button></div>
+    </form>
+  </details>
+{% endmacro %}
+
+{% block content %}
+<div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+  <div>
+    <h1 class="h3 mb-1">{{ case.case_number }} <span class="fw-normal">— {{ case.title }}</span></h1>
+    <div class="text-body-secondary">
+      {{ case.product }}{% if case.version %} {{ case.version }}{% endif %}
+      {% if case.operating_system %} · {{ case.operating_system }}{% endif %}
+      {% if case.customer %} · {{ case.customer }}{% endif %}
+      · {{ case.status }} {% if case.severity %}· Sev {{ case.severity }}{% endif %}
+      · opened {{ case.opened_on }} {{ age_badge(case) }}
+    </div>
+  </div>
+  <div class="ms-auto d-flex gap-2">
+    <a class="btn btn-outline-primary" href="{{ url_for('main.case_edit', case_id=case.id) }}"><i class="bi bi-pencil"></i> Edit case</a>
+    <form method="post" action="{{ url_for('main.case_delete', case_id=case.id) }}"
+          onsubmit="return confirm('Delete case {{ case.case_number }} and all of its notes?')">
+      <button class="btn btn-outline-danger"><i class="bi bi-trash"></i></button>
+    </form>
+  </div>
+</div>
+
+{% if not case.is_closed and case.escalation_stage == 'structured_investigation' %}
+  <div class="alert alert-danger d-flex align-items-center gap-3">
+    <i class="bi bi-exclamation-octagon fs-4"></i>
+    <div class="flex-grow-1">This case is <strong>{{ case.age_days }} days</strong> old ({{ SI_DAYS }}+): a <strong>structured investigation</strong> is due.</div>
+    <a class="btn btn-danger" href="{{ url_for('main.report', case_id=case.id, kind='structured_investigation') }}">Build SI report</a>
+  </div>
+{% elif not case.is_closed and case.escalation_stage == 'swarm' %}
+  <div class="alert alert-warning d-flex align-items-center gap-3">
+    <i class="bi bi-people fs-4"></i>
+    <div class="flex-grow-1">This case is <strong>{{ case.age_days }} days</strong> old ({{ SWARM_DAYS }}+): time to <strong>create a swarm</strong>.</div>
+    <a class="btn btn-warning" href="{{ url_for('main.report', case_id=case.id, kind='swarm') }}">Build swarm report</a>
+  </div>
+{% endif %}
+
+<ul class="nav nav-tabs" id="caseTabs" role="tablist">
+  {% for tid, label, count in tabs %}
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {% if loop.first %}active{% endif %}" id="btn-{{ tid }}" data-bs-toggle="tab"
+              data-bs-target="#tab-{{ tid }}" type="button" role="tab">
+        {{ label }}{% if count is not none %} <span class="badge rounded-pill text-bg-light border">{{ count }}</span>{% endif %}
+      </button>
+    </li>
+  {% endfor %}
+</ul>
+
+<div class="tab-content border border-top-0 rounded-bottom p-3 bg-body">
+
+  {# ---------------------------------------------------------------- Overview #}
+  <div class="tab-pane fade show active" id="tab-overview" role="tabpanel">
+    <div class="row g-4">
+      <div class="col-lg-4">
+        <table class="table table-sm">
+          <tbody>
+            <tr><th>Case number</th><td>{{ case.case_number }}</td></tr>
+            <tr><th>Product</th><td>{{ case.product }}</td></tr>
+            <tr><th>Version</th><td>{{ case.version or '—' }}</td></tr>
+            <tr><th>Operating system</th><td>{{ case.operating_system or '—' }}</td></tr>
+            <tr><th>Customer</th><td>{{ case.customer or '—' }}</td></tr>
+            <tr><th>Severity</th><td>{{ case.severity or '—' }}</td></tr>
+            <tr><th>Status</th><td>{{ case.status }}</td></tr>
+            <tr><th>Opened</th><td>{{ case.opened_on }}</td></tr>
+            {% if case.closed_on %}<tr><th>Closed</th><td>{{ case.closed_on }}</td></tr>{% endif %}
+            <tr><th>Age</th><td>{{ case.age_days }} days</td></tr>
+            <tr><th>Last updated</th><td>{{ case.updated_at|dt }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="col-lg-8">
+        {% for label, value in [('Problem description', case.problem_description), ('Business impact', case.business_impact),
+                                ('Current status', case.current_status), ('Next steps', case.next_steps),
+                                ('Help needed / ask', case.help_needed)] %}
+          <div class="mb-3">
+            <div class="small text-uppercase text-body-secondary fw-semibold">{{ label }}</div>
+            {% if value %}<div class="prewrap">{{ value }}</div>
+            {% else %}<div class="text-body-tertiary fst-italic">Not filled in — <a href="{{ url_for('main.case_edit', case_id=case.id) }}">edit case</a></div>{% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  {# ---------------------------------------------------------------- Initial response #}
+  <div class="tab-pane fade" id="tab-initial-response" role="tabpanel">
+    {% set items = case.entries_of('initial_response') %}
+    {{ add_form('initial_response', open=not items) }}
+    {% for e in items %}
+      <div class="card mb-2"><div class="card-body">
+        <div class="d-flex mb-2">
+          <div><strong>{{ e.title or 'Initial response' }}</strong>
+            <span class="text-body-secondary small ms-2">{{ e.occurred_at|dt }} · Day {{ case.day_number(e.occurred_at) }}</span></div>
+          <div class="ms-auto">{{ entry_actions(e) }}</div>
+        </div>
+        <div class="prewrap">{{ e.body }}</div>
+      </div></div>
+    {% endfor %}
+  </div>
+
+  {# ---------------------------------------------------------------- Scoping #}
+  <div class="tab-pane fade" id="tab-scoping" role="tabpanel">
+    {% set items = case.entries_of('scoping') %}
+    <div class="d-flex gap-2 mb-2">
+      <form method="post" action="{{ url_for('main.scoping_standard', case_id=case.id) }}">
+        <button class="btn btn-sm btn-outline-secondary"><i class="bi bi-list-check"></i> Add standard scoping questions</button>
+      </form>
+      {% set pending = items|rejectattr('response')|list|length %}
+      {% if pending %}<span class="badge text-bg-warning align-self-center">{{ pending }} awaiting response</span>{% endif %}
+    </div>
+    {{ add_form('scoping') }}
+    {% for e in items %}
+      <div class="card mb-2 {% if not e.response %}border-warning{% endif %}"><div class="card-body">
+        <div class="d-flex">
+          <div class="flex-grow-1">
+            <div class="fw-semibold prewrap">Q{{ loop.index }}. {{ e.question }}</div>
+            {% if e.response %}<div class="prewrap mt-1"><span class="text-success fw-semibold">A:</span> {{ e.response }}</div>
+            {% else %}<div class="mt-1 text-warning-emphasis fst-italic">Awaiting response</div>{% endif %}
+            <div class="text-body-secondary small mt-1">{{ e.occurred_at|dt }}</div>
+          </div>
+          <div class="ms-2">{{ entry_actions(e) }}</div>
+        </div>
+      </div></div>
+    {% else %}
+      <p class="text-body-secondary">No scoping questions yet.</p>
+    {% endfor %}
+  </div>
+
+  {# ---------------------------------------------------------------- Troubleshooting #}
+  <div class="tab-pane fade" id="tab-troubleshooting" role="tabpanel">
+    {% set items = case.entries_of('troubleshooting') %}
+    {{ add_form('troubleshooting') }}
+    {% if items %}
+      <p class="small text-body-secondary">{{ items|length }} session(s), {{ items|map(attribute='duration_minutes')|select|sum }} minutes recorded.</p>
+    {% endif %}
+    {% for e in items|reverse %}
+      <div class="card mb-2"><div class="card-body">
+        <div class="d-flex mb-2">
+          <div><strong>{{ e.title }}</strong>
+            <span class="text-body-secondary small ms-2">{{ e.occurred_at|dt }} · Day {{ case.day_number(e.occurred_at) }}{% if e.duration_minutes %} · {{ e.duration_minutes }} min{% endif %}</span></div>
+          <div class="ms-auto">{{ entry_actions(e) }}</div>
+        </div>
+        {{ text_block('Actions taken', e.body) }}
+        {{ text_block('Findings / results', e.findings) }}
+        {{ text_block('Next steps', e.next_steps) }}
+      </div></div>
+    {% else %}
+      <p class="text-body-secondary">No troubleshooting sessions yet.</p>
+    {% endfor %}
+  </div>
+
+  {# ---------------------------------------------------------------- Meetings #}
+  <div class="tab-pane fade" id="tab-meeting" role="tabpanel">
+    {% set items = case.entries_of('meeting') %}
+    {{ add_form('meeting') }}
+    {% for e in items|reverse %}
+      <div class="card mb-2"><div class="card-body">
+        <div class="d-flex mb-2">
+          <div><strong>{{ e.title }}</strong>
+            <span class="text-body-secondary small ms-2">{{ e.occurred_at|dt }} · Day {{ case.day_number(e.occurred_at) }}</span></div>
+          <div class="ms-auto">{{ entry_actions(e) }}</div>
+        </div>
+        {{ text_block('Attendees', e.attendees) }}
+        {{ text_block('Summary', e.body) }}
+        {{ text_block('Action items', e.action_items) }}
+      </div></div>
+    {% else %}
+      <p class="text-body-secondary">No meetings logged yet.</p>
+    {% endfor %}
+  </div>
+
+  {# ---------------------------------------------------------------- Notes #}
+  <div class="tab-pane fade" id="tab-note" role="tabpanel">
+    {% set items = case.entries_of('note') %}
+    {{ add_form('note') }}
+    {% for e in items|reverse %}
+      <div class="card mb-2"><div class="card-body">
+        <div class="d-flex mb-2">
+          <div><strong>{{ e.title }}</strong> <span class="text-body-secondary small ms-2">{{ e.occurred_at|dt }}</span></div>
+          <div class="ms-auto">{{ entry_actions(e) }}</div>
+        </div>
+        <div class="prewrap">{{ e.body }}</div>
+      </div></div>
+    {% else %}
+      <p class="text-body-secondary">No notes yet.</p>
+    {% endfor %}
+  </div>
+
+  {# ---------------------------------------------------------------- Timeline #}
+  <div class="tab-pane fade" id="tab-timeline" role="tabpanel">
+    {% if timeline %}
+    <table class="table table-sm align-middle">
+      <thead><tr><th>Day</th><th>When</th><th>Type</th><th>Summary</th></tr></thead>
+      <tbody>
+      {% for e in timeline %}
+        <tr>
+          <td>{{ case.day_number(e.occurred_at) }}</td>
+          <td class="text-nowrap">{{ e.occurred_at|dt }}</td>
+          <td><span class="badge type-{{ e.entry_type }}">{{ ENTRY_TYPES[e.entry_type].label }}</span></td>
+          <td>{{ e.summary }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="text-body-secondary">Nothing logged yet.</p>
+    {% endif %}
+  </div>
+
+  {# ---------------------------------------------------------------- Escalation #}
+  <div class="tab-pane fade" id="tab-escalation" role="tabpanel">
+    {% set pct = [100, (case.age_days / SI_DAYS * 100)|round|int]|min %}
+    <div class="mb-1 position-relative small text-body-secondary" style="height: 1.3rem">
+      <span class="position-absolute start-0">Day 0</span>
+      <span class="position-absolute" style="left: {{ (SWARM_DAYS / SI_DAYS * 100)|round|int }}%">| Swarm · {{ SWARM_DAYS }}d</span>
+      <span class="position-absolute end-0">SI · {{ SI_DAYS }}d</span>
+    </div>
+    <div class="progress mb-4" role="progressbar" style="height: 1.25rem">
+      <div class="progress-bar {% if case.investigation_due %}bg-danger{% elif case.swarm_due %}bg-warning{% else %}bg-success{% endif %}"
+           style="width: {{ pct }}%">{{ case.age_days }} days</div>
+    </div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-6">
+        <div class="card h-100 {% if case.swarm_due %}border-warning{% endif %}"><div class="card-body">
+          <h3 class="h5"><i class="bi bi-people"></i> Swarm request <small class="text-body-secondary">({{ SWARM_DAYS }}+ days)</small></h3>
+          <p class="mb-3">Compiles case details, initial response, scoping Q&amp;A, all troubleshooting sessions, meetings, notes and a day-by-day log of what you've done.</p>
+          {% if case.swarm_due %}<span class="badge text-bg-warning mb-2">Due</span>{% else %}<span class="badge text-bg-light border mb-2">Due in {{ SWARM_DAYS - case.age_days }} day(s)</span>{% endif %}
+          <div><a class="btn btn-warning" href="{{ url_for('main.report', case_id=case.id, kind='swarm') }}">Generate swarm report</a></div>
+        </div></div>
+      </div>
+      <div class="col-md-6">
+        <div class="card h-100 {% if case.investigation_due %}border-danger{% endif %}"><div class="card-body">
+          <h3 class="h5"><i class="bi bi-diagram-3"></i> Structured investigation <small class="text-body-secondary">({{ SI_DAYS }}+ days)</small></h3>
+          <p class="mb-3">Formal write-up: executive summary, problem statement, environment, escalation history, timeline table, consolidated findings and action items, gaps and the ask.</p>
+          {% if case.investigation_due %}<span class="badge text-bg-danger mb-2">Due</span>{% else %}<span class="badge text-bg-light border mb-2">Due in {{ SI_DAYS - case.age_days }} day(s)</span>{% endif %}
+          <div><a class="btn btn-danger" href="{{ url_for('main.report', case_id=case.id, kind='structured_investigation') }}">Generate SI report</a></div>
+        </div></div>
+      </div>
+    </div>
+
+    <h3 class="h6 text-uppercase text-body-secondary">Readiness check</h3>
+    {% if gaps %}
+      <ul class="list-group">
+        {% for g in gaps %}<li class="list-group-item"><i class="bi bi-exclamation-triangle text-warning"></i> {{ g }}</li>{% endfor %}
+      </ul>
+    {% else %}
+      <div class="alert alert-success mb-0"><i class="bi bi-check-circle"></i> All key information is captured.</div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Open the tab named in the URL hash (used after adding / editing entries) and keep the hash in sync.
+  (function () {
+    function show(hash) {
+      var btn = hash && document.querySelector('[data-bs-target="' + hash + '"]');
+      if (btn) bootstrap.Tab.getOrCreateInstance(btn).show();
+    }
+    show(location.hash);
+    document.querySelectorAll('#caseTabs [data-bs-toggle="tab"]').forEach(function (btn) {
+      btn.addEventListener('shown.bs.tab', function (ev) {
+        history.replaceState(null, '', ev.target.getAttribute('data-bs-target'));
+      });
+    });
+  })();
+</script>
+{% endblock %}

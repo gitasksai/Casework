@@ -1,0 +1,43 @@
+{
+  // Run and Debug configurations (Ctrl+Shift+D, pick one, press F5)
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Casework: dev server (http://127.0.0.1:5000)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "flask",
+      "env": { "FLASK_APP": "run.py", "FLASK_DEBUG": "1" },
+      "args": ["run", "--no-debugger", "--no-reload", "--port", "5000"],
+      "jinja": true,
+      "justMyCode": true
+    },
+    {
+      "name": "Casework: HTTPS server (https://localhost:8443)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/serve.py",
+      "env": {
+        "CASEWORK_SSL_CERT": "${workspaceFolder}/certs/cert.pem",
+        "CASEWORK_SSL_KEY": "${workspaceFolder}/certs/key.pem",
+        "CASEWORK_PORT": "8443"
+      },
+      "jinja": true
+    },
+    {
+      "name": "Casework: load sample data",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/seed.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Casework: create self-signed certificate",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tls_cert.py",
+      "args": ["self-signed"],
+      "console": "integratedTerminal"
+    }
+  ]
+}

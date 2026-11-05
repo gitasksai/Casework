@@ -46,6 +46,12 @@ python run.py                      # http://127.0.0.1:5000
 
 Data is stored in SQLite at `instance/casework.db`.
 
+## Building it yourself
+
+[docs/BUILD_FROM_SCRATCH_VSCODE.md](docs/BUILD_FROM_SCRATCH_VSCODE.md) walks through creating
+the whole app file by file in Visual Studio Code. The `.vscode/` folder has ready-made
+Run and Debug configurations (dev server, HTTPS server, sample data, certificate).
+
 ## Deploying on Windows Server
 
 See **[docs/DEPLOY_WINDOWS.md](docs/DEPLOY_WINDOWS.md)** for running it as a Windows service

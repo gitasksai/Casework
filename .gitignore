@@ -5,3 +5,4 @@ venv/
 instance/
 .pytest_cache/
 *.db
+backups/

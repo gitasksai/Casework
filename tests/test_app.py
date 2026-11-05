@@ -176,3 +176,16 @@ def test_delete_case_cascades(client, app):
     with app.app_context():
         assert db.session.get(Case, cid) is None
         assert Entry.query.count() == 0
+
+
+def test_basic_auth_when_configured():
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+                      "CASEWORK_USERNAME": "me", "CASEWORK_PASSWORD": "s3cret"})
+    c = app.test_client()
+    assert c.get("/").status_code == 401
+    assert c.get("/", auth=("me", "wrong")).status_code == 401
+    assert c.get("/", auth=("me", "s3cret")).status_code == 200
+
+
+def test_no_auth_by_default(client):
+    assert client.get("/").status_code == 200

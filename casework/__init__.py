@@ -21,7 +21,11 @@ def create_app(test_config=None):
     if test_config:
         app.config.update(test_config)
 
+    app.config.setdefault("CASEWORK_USERNAME", os.environ.get("CASEWORK_USERNAME"))
+    app.config.setdefault("CASEWORK_PASSWORD", os.environ.get("CASEWORK_PASSWORD"))
+
     db.init_app(app)
+    _install_basic_auth(app)
 
     from . import routes
 
@@ -32,3 +36,23 @@ def create_app(test_config=None):
         db.create_all()
 
     return app
+
+
+def _install_basic_auth(app):
+    """Require a username/password for every page when CASEWORK_USERNAME and
+    CASEWORK_PASSWORD are set. Off when they are not set (local single-user use)."""
+    import hmac
+
+    from flask import Response, request
+
+    @app.before_request
+    def _require_login():
+        user, pwd = app.config.get("CASEWORK_USERNAME"), app.config.get("CASEWORK_PASSWORD")
+        if not (user and pwd):
+            return None
+        auth = request.authorization
+        if (auth and auth.type == "basic"
+                and hmac.compare_digest((auth.username or "").encode(), user.encode())
+                and hmac.compare_digest((auth.password or "").encode(), pwd.encode())):
+            return None
+        return Response("Login required.", 401, {"WWW-Authenticate": 'Basic realm="Casework"'})

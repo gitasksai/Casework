@@ -46,6 +46,12 @@ python run.py                      # http://127.0.0.1:5000
 
 Data is stored in SQLite at `instance/casework.db`.
 
+## Deploying on Windows Server
+
+See **[docs/DEPLOY_WINDOWS.md](docs/DEPLOY_WINDOWS.md)** for running it as a Windows service
+with Waitress (`python serve.py`), a login, firewall, HTTPS via IIS, and daily backups
+(`python backup.py`).
+
 ## Configuration (environment variables)
 
 | Variable | Default | Purpose |
@@ -54,6 +60,8 @@ Data is stored in SQLite at `instance/casework.db`.
 | `CASEWORK_SI_AGE_DAYS` | `15` | Age at which a structured investigation is due |
 | `CASEWORK_DATABASE_URL` | `sqlite:///instance/casework.db` | SQLAlchemy database URL |
 | `CASEWORK_SECRET_KEY` | `dev-change-me` | Flask session secret (set this if you host it) |
+| `CASEWORK_USERNAME` / `CASEWORK_PASSWORD` | *(unset)* | When both are set, every page requires this login |
+| `CASEWORK_HOST` / `CASEWORK_PORT` | `0.0.0.0` / `8080` | Where `serve.py` listens |
 
 ## Tests
 
@@ -63,5 +71,7 @@ pytest
 
 ## Note
 
-This is built as a single-user tool to run on your own machine. It has no login or CSRF
-protection, so don't expose it on a shared network without adding authentication.
+Without `CASEWORK_USERNAME`/`CASEWORK_PASSWORD` there is no login, so set them before
+exposing it on a network. The login is HTTP Basic auth: use HTTPS (see the Windows guide)
+unless the network is trusted. Bootstrap is bundled in `casework/static/vendor`, so no
+internet access is needed.

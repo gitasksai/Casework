@@ -53,6 +53,23 @@ it to Casework. Casework sorts the case feed into the tabs, ignores follow-ups, 
 and automated posts, and shows a review screen before anything is saved. See
 **[docs/CHROME_EXTENSION.md](docs/CHROME_EXTENSION.md)**.
 
+## Tableau on-call skill
+
+`.claude/skills/tableau-oncall/` is a Claude skill for Tableau support on call. Describe a customer's
+Tableau problem (or paste the case, an error dialog or logs) and it answers with a short card: likely
+cause, what to do now, what to ask the customer, which logs to collect, when to escalate, and links to
+the sources it checked (Salesforce Trust status, Known Issues, Tableau release notes, help.tableau.com,
+Tableau Knowledge articles on help.salesforce.com, Community).
+
+- **Claude Code:** it loads automatically when you open this folder. To use it everywhere, copy
+  `.claude/skills/tableau-oncall/` to `~/.claude/skills/`.
+- **Claude app:** zip the `tableau-oncall` folder and upload it under Settings > Capabilities > Skills.
+- Turn on web search in the chats where you use it.
+- Log scanner (standard library only):
+  `python .claude/skills/tableau-oncall/scripts/scan_logs.py logs.zip --since "2026-11-12 10:00" [--req <id>] [--grep timeout]`
+
+Remove customer names and internal hostnames before pasting anything.
+
 ## Building it yourself
 
 [docs/BUILD_FROM_SCRATCH_VSCODE.md](docs/BUILD_FROM_SCRATCH_VSCODE.md) walks through creating
